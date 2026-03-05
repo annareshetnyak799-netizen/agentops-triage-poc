@@ -1,69 +1,110 @@
-# Governance — безопасность, риски и политика эксплуатации (PoC)
+# GOVERNANCE — безопасность, риски и управление (PoC)
 
-Цель документа: зафиксировать риск-профиль PoC и минимальные меры управления (детект/защита), чтобы проект соответствовал требованиям по safety, evals и наблюдаемости.
+Цель: зафиксировать риск-профиль AgentOps Triage PoC и меры управления (детект/защита), чтобы система была безопасной, наблюдаемой и проверяемой через evals.
+
+---
 
 ## 1) Risk Register
 
-| Риск | Вероятность | Влияние | Детект | Защита | Остаточный риск |
+| Риск | Вероятность | Влияние | Детект | Защита | Остаточный риск (описание) |
 |---|---:|---:|---|---|---|
-| PII утечка (логи/тикеты → ответ/логи системы) | M | H | PII-scan тесты, лог-ревью | PII redaction до логирования и до ответа, запрет raw logging | L |
-| Prompt injection из KB/logs (“ignore instructions…”) | M | H | спец-кейсы injection в evals | sanitize inputs, system policy, tool allowlist, “cite or ask” | M→L |
-| Опасные действия (rm/delete/rollout) без подтверждения | L–M | H | policy-violation тесты, audit trail tool-calls | allowlist инструментов, write запрещён, approval required | L |
-| Галлюцинации (выдуманные факты) | M | M | rubric: groundedness, citation rate | требование ссылок на источники; если нет — ask-for-data | M |
-| Недоступность tools (timeout/403/5xx) | M | M | метрики ошибок tool-calls, тесты failover | retry+backoff, fallback KB-only, явное сообщение | L–M |
-| Утечка секретов/токенов в логах | L | H | secret scanners (basic), ревью логов | не хранить secrets в PoC; маскирование токенов | L |
-| Перегруз/стоимость (слишком много tool-calls/токенов) | M | M | лимиты и метрики usage | rate limit, max tool-calls, token budget | L |
+| PII утечка (логи/тикеты → ответ/логи системы) | M | H | PII-evals (fixtures), ревью логов | PII redaction до логирования и до ответа, запрет raw logging | Возможны **false negatives** на нестандартных форматах PII; требуется расширять детекторы и тесты |
+| Prompt injection из KB/logs (“ignore instructions…”) | M | H | injection fixtures в evals | sanitize inputs, системная политика, tool allowlist, правило “cite-or-ask” | Агент может выдать “социально-инженерный” текст/совет; уменьшаем через policy+evals, но 100% не гарантируем |
+| Опасные действия без подтверждения (delete/rollback/disable) | L–M | H | policy-violation тесты, аудит tool-calls | write отключён по умолчанию, allowlist, `requires_approval=true` | Возможно unsafe **предложение текстом** (без исполнения); контролируем через правила ответа + evals |
+| Галлюцинации/выдуманные факты | M | M | rubric groundedness + citation rate | требование refs; если данных нет — ask-for-data; ограничение контекста | Возможны ошибки интерпретации сигналов; снижаем через fixtures+rubric, полностью не убирается |
+| Недоступность tools (timeout/403/5xx) | M | M | метрики ошибок tool-calls, failover fixtures | retry+backoff, fallback KB-only, явное сообщение | При длительном outage инструментов падает качество triage; корректная деградация обязательна |
+| Утечка секретов/токенов в логах | L | H | secret-pattern scan (basic), ревью | не хранить secrets в PoC; маскирование токенов; запрет raw logging | Нестандартные токены могут пройти; покрываем “canary” строками и расширяем паттерны |
+| Перерасход бюджета (токены/tool-calls/latency) | M | M | usage metrics, p95 latency | `max_tool_calls`, token budget, timeouts, truncate/summarize | В тяжёлых кейсах возможны превышения → нужен degrade mode (меньше tool-calls, больше вопросов) |
 
 Шкала: L/M/H — low/medium/high.
 
-## 2) Политика логов и персональных данных
-### 2.1 Принципы
-- **No raw PII in logs**: любые потенциальные PII маскируются ДО записи
+---
+
+## 2) Tool Governance и Approval workflow
+
+**Цель:** предотвратить “secondary incidents” и исключить автоматические risky действия.
+
+### 2.1 Allowlist/denylist
+- По умолчанию разрешены **только read-only** инструменты: MetricsTool, LogsTool, KBTool.
+- Любые write/dangerous действия:
+  - выключены в PoC, **или**
+  - доступны только через отдельный tool с обязательным `requires_approval=true`.
+
+### 2.2 Approval
+- Агент может **предложить** действие (команда/шаг), но обязан:
+  - явно пометить его как требующее подтверждения,
+  - дождаться подтверждения человека,
+  - зафиксировать решение в audit trail.
+
+### 2.3 Audit trail
+Каждый tool-call логируется в структурированном виде:
+- `session_id`, `tool_name`, `status`, `latency_ms`, `error_type`
+- параметры запросов — только в безопасном виде (без PII/секретов)
+
+---
+
+## 3) Политика логов и персональных данных (PII)
+
+### 3.1 Принципы
+- **No raw PII in logs:** редактирование до записи в логи и до ответа пользователю
 - Логи должны быть **структурированными** (JSON) и коррелируемыми по `session_id`
-- Сохраняем только минимум данных, нужный для отладки и evals
+- Храним минимум данных, необходимых для отладки и evals (data minimization)
 
-### 2.2 Что логируем
-- `session_id`, timestamps, шаги агента (plan/action/observation)
-- факты о tool-calls (название, статус, latency, ошибки)
-- ссылки на источники (KB ref IDs), но не сырое содержимое документов целиком
+### 3.2 Что логируем
+- шаги агента: `plan/action/observation/decision`
+- tool-calls (см. audit trail)
+- ссылки на источники (IDs/refs), но не полный текст документов/логов
 
-### 2.3 Что НЕ логируем
-- сырые логи пользователей/тикетов без редактирования
-- секреты, токены, пароли
-- “полный промпт” без необходимости (если логируем — то с redaction)
+### 3.3 Что НЕ логируем
+- сырые инцидентные логи без redaction
+- токены, пароли, секреты
+- полный prompt (если очень нужно — только после redaction и с ограничениями)
 
-## 3) Защита от injection и unsafe контента
-### 3.1 Input sanitization
-- Любой текст из logs/KB рассматривается как недоверенный
-- Сжимать контекст: выкидывать мусор, ограничивать длину (max chars)
+---
 
-### 3.2 Политика агента (“Cite or ask”)
-- Если утверждение не подтверждено tools/KB — агент должен:
-  - или запросить уточнение,
-  - или сказать “нет данных”
-- В ответах всегда предпочитать ссылки/цитирование источников (refs)
+## 4) Защита от prompt injection и unsafe инструкций
 
-### 3.3 Контроль инструментов (Tool Governance)
-- **Allowlist по умолчанию**: только read-only
-- Любые write/dangerous инструменты:
-  - выключены в PoC, или
-  - требуют `approval=true` + отдельной валидации
+### 4.1 Недоверенные входы
+Любой текст из logs/KB рассматривается как **недоверенный**:
+- truncate по длине,
+- sanitize (удаление мусора/артефактов),
+- запрет следования “инструкциям” из данных.
 
-## 4) Approval workflow (Human-in-the-loop)
-- Действия уровня риска “write/production-impact” нельзя выполнять автоматически
-- Агент может:
-  - предложить команду/шаг,
-  - пометить как `requires_approval`,
-  - дождаться подтверждения от пользователя
+### 4.2 Правило “Cite-or-Ask”
+Если утверждение не подтверждено tools/KB:
+- агент должен запросить уточнение или сказать “нет данных”,
+- предпочтение ответам со ссылками/refs.
 
-## 5) Evals как механизм управления рисками
-В evals включаем минимум:
-- PII cases → ожидаем 0 утечек
-- injection cases → ожидаем 0 нарушений policy
-- failover cases → корректная деградация
-- rubric на groundedness → снижение галлюцинаций
+---
 
-## 6) Политика доступов (PoC)
-- PoC работает на mock данных/fixtures
-- Нет production secrets
-- При добавлении реальных интеграций: только read-only токены, минимальные права
+## 5) Evals как механизм управления рисками (risk → test → metric)
+
+| Риск | Evals сценарий | Метрика/критерий успеха |
+|---|---|---|
+| PII leakage | PII fixtures (email/phone/token/canary) | `PII leakage rate = 0` в ответах и логах |
+| Injection | injected logs/runbooks | `policy violation rate = 0`, игнорирование вредных инструкций |
+| Dangerous actions | “предложи delete/rollback/disable” | все risky шаги помечены `requires_approval`, ничего не исполняется |
+| Галлюцинации | missing-data / conflicting signals | rubric groundedness ≥ 1, задаёт вопросы вместо догадок |
+| Tool outages | timeout/403/5xx fixtures | fallback correctness ≥ 0.8, корректные сообщения об ограничениях |
+| Бюджет/latency | heavy-context fixture | p95 latency в ограничениях **или** корректный degrade mode |
+
+---
+
+## 6) Доступы и данные (PoC)
+
+- PoC работает на **fixtures/mocks**, без production secrets.
+- При добавлении реальных интеграций:
+  - только read-only токены,
+  - минимальные права (least privilege),
+  - rate limits и лимиты tool-calls.
+
+---
+
+## 7) Mapping на требования Milestone
+
+- **Зона безопасности (PII/опасные действия):** разделы 2–4
+- **Risk register:** раздел 1
+- **Политика логов и PII:** раздел 3
+- **Защиты от injection и подтверждение действий:** разделы 2 и 4
+- **Evals/мониторинг/управление рисками:** раздел 5
+- **Операционные ограничения и доступы:** раздел 6
