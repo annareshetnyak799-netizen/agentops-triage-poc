@@ -87,11 +87,24 @@
 
 ---
 
-## Документы
-- [`docs/PRODUCT-PROPOSAL.md`](docs/PRODUCT-PROPOSAL.md) — идея, метрики, сценарии, ограничения, архитектура, data flow
-- [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md) — risk register, политика логов/PII, защита от injection, approval workflow
-- [`docs/METRICS.md`](docs/METRICS.md) — метрики качества PoC (v0)
+## Документация
+
+Проект включает несколько групп документов: продуктовые и governance-материалы, а также проектную документацию, ориентированную на дальнейшую реализацию системы.
+
+### Продукт и правила работы системы
+- [`docs/PRODUCT-PROPOSAL.md`](docs/PRODUCT-PROPOSAL.md) — идея проекта, метрики, сценарии, ограничения, архитектура и data flow
+- [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md) — risk register, политика логов и PII, защита от prompt injection, approval workflow
+- [`docs/METRICS.md`](docs/METRICS.md) — метрики качества PoC
 - [`docs/EVALS.md`](docs/EVALS.md) — методика оценивания и формат отчёта
+
+### Проектная документация для реализации
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — общая архитектура системы и зоны ответственности компонентов
+- [`docs/API_SPEC.md`](docs/API_SPEC.md) — внешний API-контракт системы
+- [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — доменные сущности и связи между ними
+- [`docs/TOOL_CONTRACTS.md`](docs/TOOL_CONTRACTS.md) — контракты инструментов, их интерфейсы и границы безопасности
+- [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) — жизненный цикл сессии и модель переходов между состояниями
+
+Эти документы используются как основа для планирования реализации, построения каркаса кодовой базы и дальнейшего развития проекта.
 
 ---
 
