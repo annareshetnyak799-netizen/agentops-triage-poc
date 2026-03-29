@@ -641,6 +641,8 @@ Approve or reject a gated action.
 
 This endpoint is used when the triage workflow enters `waiting_approval`.
 
+For the current PoC, this endpoint resolves a gated recommendation and records the human decision in the audit trail. It does not trigger autonomous write execution, because write-capable tools are disabled by default.
+
 ### Path params
 
 | Param | Type | Required | Description |

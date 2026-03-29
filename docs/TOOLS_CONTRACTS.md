@@ -50,6 +50,10 @@ but not:
 - scale,
 - patch.
 
+Per-tool timeout values are hard upper bounds for individual integrations.
+The orchestrator may stop earlier due to session-level budget limits and return `partial_completed`.
+
+
 ### 2.2 Structured input and output
 Each tool must accept a structured input payload and return a structured output payload.
 

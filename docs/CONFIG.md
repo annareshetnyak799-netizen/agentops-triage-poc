@@ -3,7 +3,8 @@
 ## 1) Time & tool budgets
 - `p95_ttfa_target_s = 30`
 - `max_tool_calls = 6`
-- `tool_timeout_s = 3`
+- `tool_timeout_s = 3` is the default orchestration target timeout
+- individual tools may define higher hard limits, but overall session execution must still respect `time_budget_s`
 - `max_retries = 2`
 - `time_budget_s = 30` (soft)
 

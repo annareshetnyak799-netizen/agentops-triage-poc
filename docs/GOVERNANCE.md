@@ -26,6 +26,10 @@
 
 ### 2.1 Allowlist/denylist
 - По умолчанию разрешены **только read-only** инструменты: MetricsTool, LogsTool, KBTool.
+- В implementation-level контрактах этим logical names соответствуют канонические идентификаторы:
+  - `MetricsTool` → `metrics_tool`
+  - `LogsTool` → `logs_tool`
+  - `KBTool` → `runbook_retrieval_tool`
 - Любые write/dangerous действия:
   - выключены в PoC, **или**
   - доступны только через отдельный tool с обязательным `requires_approval=true`.
@@ -35,6 +39,7 @@
   - явно пометить его как требующее подтверждения,
   - дождаться подтверждения человека,
   - зафиксировать решение в audit trail.
+- В текущем PoC approval используется для gated recommendations и audit trail; write-capable tools по умолчанию отключены.
 
 ### 2.3 Audit trail
 Каждый tool-call логируется в структурированном виде:
