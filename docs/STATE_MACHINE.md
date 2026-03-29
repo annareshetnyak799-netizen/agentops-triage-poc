@@ -430,6 +430,8 @@ The system must not:
 - assume approval,
 - perform risky actions before explicit decision.
 
+In the current PoC, approval is used to resolve gated recommendations and preserve an explicit human decision point in the session lifecycle. It does not authorize autonomous write execution, because write-capable tools are disabled by default.
+
 ### 8.2 Approval outcomes
 Possible outcomes:
 - approved -> continue or finalize

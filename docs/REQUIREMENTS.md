@@ -75,6 +75,12 @@ PoC считается успешным, если на тестовом набо
    - MetricsTool: query metrics (read-only)
    - LogsTool: query logs (read-only)
    - KBTool: search runbooks (RAG / BM25 / hybrid)
+   
+  Канонические implementation-level идентификаторы инструментов:
+   - `MetricsTool` → `metrics_tool`
+   - `LogsTool` → `logs_tool`
+   - `KBTool` → `runbook_retrieval_tool`
+
 4. **Knowledge Base**
    - Runbooks, FAQ, “known issues”
 5. **State & Memory**
@@ -95,10 +101,11 @@ PoC считается успешным, если на тестовом набо
 
 ## 8) Функциональные требования (Functional Requirements)
 ### FR-1. Приём инцидента
-Система принимает инцидент:
-- `title`, `service`, `severity`, `timestamp`
-- `alert_payload` (labels/annotations)
-- опционально `links` (dashboards, tickets)
+Система принимает инцидент с минимальным каноническим набором полей:
+- `title`, `service`, `severity`, `timestamp`, `summary`
+- опционально `signals`
+- опционально `environment`, `reporter`
+- опционально `alert_payload` и `links` как расширения входного контракта
 
 ### FR-2. Планирование и разбор
 Агент обязан:
@@ -162,13 +169,34 @@ PoC считается успешным, если на тестовом набо
 Выход: `eval_report.md` + метрики + примеры провалов.
 
 ## 12) Форматы данных (черновик)
+
 ### Incident (input)
+Канонический контракт входного инцидента для реализации зафиксирован в `docs/API_SPEC.md`.
+
+Поля `alert_payload` и `links` рассматриваются как опциональные расширения и могут быть опущены в минимальном PoC-сценарии.
+
 ```json
 {
   "title": "High 5xx rate",
   "service": "payments-api",
   "severity": "P1",
   "timestamp": "2026-02-22T10:00:00Z",
-  "alert_payload": {"labels": {}, "annotations": {}},
-  "links": ["https://.../dashboard"]
+  "summary": "Error rate increased after deploy",
+  "signals": [
+    "5xx > 12%",
+    "latency p95 up 3x"
+  ],
+  "environment": "prod",
+  "reporter": "oncall-engineer",
+  "alert_payload": {
+    "labels": {},
+    "annotations": {}
+  },
+  "links": [
+    "https://.../dashboard"
+  ]
 }
+```
+
+
+

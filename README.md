@@ -89,7 +89,10 @@
 
 ## Документация
 
-Проект включает несколько групп документов: продуктовые и governance-материалы, а также проектную документацию, ориентированную на дальнейшую реализацию системы.
+Проект включает продуктовые, governance и implementation-oriented документы, которые вместе образуют пакет системного дизайна PoC.
+
+### Основной документ Milestone 2
+- [`docs/SYSTEM-DESIGN.md`](docs/SYSTEM-DESIGN.md) — сводный системный дизайн PoC: архитектурные решения, модули, workflow, state/memory, retrieval, integrations, failure modes, guardrails и operational limits
 
 ### Продукт и правила работы системы
 - [`docs/PRODUCT-PROPOSAL.md`](docs/PRODUCT-PROPOSAL.md) — идея проекта, метрики, сценарии, ограничения, архитектура и data flow
@@ -101,10 +104,19 @@
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — общая архитектура системы и зоны ответственности компонентов
 - [`docs/API_SPEC.md`](docs/API_SPEC.md) — внешний API-контракт системы
 - [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) — доменные сущности и связи между ними
-- [`docs/TOOL_CONTRACTS.md`](docs/TOOL_CONTRACTS.md) — контракты инструментов, их интерфейсы и границы безопасности
+- [`docs/TOOLS_CONTRACTS.md`](docs/TOOLS_CONTRACTS.md) — контракты инструментов, их интерфейсы и границы безопасности
 - [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) — жизненный цикл сессии и модель переходов между состояниями
+- [`docs/STATE_MEMORY.md`](docs/STATE_MEMORY.md) — политика state/memory и summarization
+- [`docs/KB_SPEC.md`](docs/KB_SPEC.md) — retrieval-контур и формат базы знаний
+- [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — логи, метрики, трейсы и degraded-mode observability
+- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — активы, trust boundaries, угрозы и меры защиты
+- [`docs/CONFIG.md`](docs/CONFIG.md) — runtime limits и базовые настройки PoC
 
-Эти документы используются как основа для планирования реализации, построения каркаса кодовой базы и дальнейшего развития проекта.
+### Диаграммы и модульные спеки
+- [`docs/diagrams/`](docs/diagrams/) — C4 context/container/component, workflow и data-flow диаграммы
+- [`docs/specs/`](docs/specs/) — короткие технические спецификации по orchestrator, tools/retrieval и serving/observability
+
+Эти документы используются как основа для review Milestone 2, планирования реализации и дальнейшего развития системы.
 
 ---
 

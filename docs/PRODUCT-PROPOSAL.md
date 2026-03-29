@@ -90,6 +90,10 @@
   - MetricsTool
   - LogsTool
   - KBTool (search runbooks / RAG)
+- Для реализации в коде используются канонические имена инструментов:
+  - `MetricsTool` → `metrics_tool`
+  - `LogsTool` → `logs_tool`
+  - `KBTool` → `runbook_retrieval_tool`
 - State & Memory:
   - session store, step history, summaries
 - Safety Layer:
@@ -123,3 +127,4 @@ sequenceDiagram
   S->>O: safe structured logs/metrics (no PII)
   A->>API: report (hypotheses, next steps, refs)
   API->>U: response
+  ```
