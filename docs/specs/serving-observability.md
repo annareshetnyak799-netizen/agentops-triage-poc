@@ -77,6 +77,19 @@ Secrets не должны попадать:
 
 Если отдельный dependency имеет больший hard timeout, orchestrator всё равно обязан уважать общий session budget.
 
+## Traffic Control and Efficiency
+
+Для PoC достаточно простых runtime controls:
+- bounded concurrency на уровне HTTP service;
+- rate limiting на входящие triage requests;
+- no batching by default, так как PoC ориентирован на interactive incident triage, а не bulk inference;
+- retrieval и tool responses могут кэшироваться краткоживущим in-memory cache по `(service, query, time_range)` в рамках одной session или короткого окна.
+
+Цель этих механизмов:
+- не перегружать внешние зависимости;
+- не создавать cascading failures при burst traffic;
+- удерживать latency и cost в пределах bounded execution model.
+
 ## Observability
 
 ### Structured logs
@@ -111,6 +124,38 @@ Secrets не должны попадать:
 - one span per major orchestration step;
 - child spans per tool call.
 
+## Dashboard Layout
+
+Для PoC достаточно одного operational dashboard с четырьмя зонами:
+1. **Latency**
+   - TTFA p50 / p95
+   - end-to-end latency p50 / p95
+
+2. **Dependency health**
+   - tool failure rate
+   - LLM failure rate
+   - degraded session rate
+
+3. **Safety**
+   - policy blocks
+   - PII redactions
+   - approval requests
+
+4. **Execution quality**
+   - tool success rate
+   - fallback usage
+   - budget exhaustion count
+
+## Example Alert Rules
+
+Примерные alert thresholds для PoC:
+- `TTFA p95 > 30s` в течение 15 минут
+- `tool_calls_failed / tool_calls_total > 0.1` в течение 15 минут
+- `llm_calls_failed / llm_calls_total > 0.1` в течение 15 минут
+- `degraded_sessions_total` заметно выше baseline
+- `policy_blocks_total > 0` ожидаемо допустимо, но требует review
+- `PII leakage > 0` считается критическим дефектом
+
 ## Eval Signals
 
 Runtime and quality checks для PoC:
@@ -129,6 +174,35 @@ Runtime and quality checks для PoC:
 - degrade gracefully when tools or KB are unavailable;
 - return `partial_completed` if safe useful result exists;
 - avoid hanging sessions beyond configured budget.
+
+## Graceful Shutdown
+
+При остановке сервиса expected behavior такой:
+- новые sessions больше не принимаются;
+- активным sessions даётся bounded grace period на завершение;
+- если session не успела завершиться, в persistence сохраняется последний безопасный state и trace metadata;
+- после рестарта сервис может либо восстановить session из persisted state, либо явно пометить её как interrupted / failed depending on implementation mode.
+
+## CI / CD and LLMOps Gate
+
+Для текущего PoC достаточно лёгкого pipeline, который проверяет изменения в prompts, config и eval artifacts перед merge:
+
+1. **Static checks**
+- markdown/docs lint
+- schema sanity checks
+- basic config validation
+
+2. **Quality checks**
+- regression eval run на фиксированных fixtures
+- проверка safety scenarios: PII, injection, policy violation, tool outage
+
+3. **Review gate**
+- manual review для изменений prompt templates, runtime limits и safety policy
+- merge в основную ветку только после успешного прохождения eval regression
+
+4. **Deployment strategy for PoC**
+- ручной rollout в `main`
+- без сложного staged deployment
 
 ## Persistence Guidance
 

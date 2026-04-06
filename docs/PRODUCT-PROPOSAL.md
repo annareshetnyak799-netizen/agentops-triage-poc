@@ -127,4 +127,4 @@ sequenceDiagram
   S->>O: safe structured logs/metrics (no PII)
   A->>API: report (hypotheses, next steps, refs)
   API->>U: response
-  ```
+```

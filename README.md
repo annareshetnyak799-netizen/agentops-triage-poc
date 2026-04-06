@@ -2,8 +2,6 @@
 **Агентная система для триажа инцидентов:** автоматически собирает сигналы через инструменты (метрики/логи), находит релевантные runbooks в базе знаний, ведёт сессионную память и выдаёт безопасный план действий.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
-[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg?logo=docker&logoColor=white)](#)
-[![CI](https://img.shields.io/badge/ci-github_actions-black.svg?logo=githubactions&logoColor=white)](#)
 [![Status](https://img.shields.io/badge/status-PoC-orange.svg)](#)
 
 > **Зачем это бизнесу:** меньше простой и дешевле on-call.  
@@ -113,7 +111,7 @@
 - [`docs/CONFIG.md`](docs/CONFIG.md) — runtime limits и базовые настройки PoC
 
 ### Диаграммы и модульные спеки
-- [`docs/diagrams/`](docs/diagrams/) — C4 context/container/component, workflow и data-flow диаграммы
+- [`docs/diagrams/`](docs/diagrams/) — C4 context/container/component, workflow, sequence, state-machine, deployment и data-flow диаграммы
 - [`docs/specs/`](docs/specs/) — короткие технические спецификации по orchestrator, tools/retrieval и serving/observability
 
 Эти документы используются как основа для review Milestone 2, планирования реализации и дальнейшего развития системы.

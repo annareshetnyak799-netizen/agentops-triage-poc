@@ -17,7 +17,34 @@ Memory — сжатое представление контекста для LLM
 - или перед финальным отчётом.
 
 Выход summary:
-- коротко: “что знаем”, “что пробовали”, “что ещё нужно”.
+
+### Формат rolling summary
+Rolling summary хранится в компактном structured виде:
+- `what_we_know`: подтверждённые факты и наблюдения;
+- `what_we_tried`: уже выполненные шаги и результаты;
+- `open_questions`: чего не хватает для уверенного вывода;
+- `current_hypotheses`: 1–3 актуальные hypotheses с кратким статусом.
+
+### Формат known facts
+Known facts — это короткий список атомарных подтверждённых утверждений, например:
+- `payments-api error_rate increased from 0.8% to 12.4%`
+- `logs contain PaymentProviderTimeout after deploy`
+- `runbook suggests dependency health check before rollback`
+
+Known facts должны быть:
+- grounded;
+- краткими;
+- без raw PII;
+- пригодными для прямого включения в prompt context.
+
+### Eviction и prompt construction
+Memory не является бесконечной:
+- при росте контекста старые detailed observations сворачиваются в summary;
+- в prompt попадают только normalized incident input, rolling summary, known facts, top observations и relevant refs;
+- длинные raw logs и retrieval chunks не включаются в prompt целиком;
+- eviction происходит в пользу кратких grounded summaries, а не в пользу накопления сырого текста.
+
+В текущем PoC memory носит episodic session-scoped характер и не предназначена для долгосрочного межсессионного reuse.
 
 ## 4) Memory safety
 - summary проходит через PII redaction

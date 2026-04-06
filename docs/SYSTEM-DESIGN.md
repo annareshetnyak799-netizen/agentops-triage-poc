@@ -56,6 +56,40 @@ AgentOps Triage PoC — это сервис для первичного triage �
 
 ---
 
+### 2.1 Agentic Pattern Choice
+
+В текущем PoC выбран паттерн **plan-and-execute** с элементами **ReAct**.
+
+- `plan-and-execute` используется как базовая orchestration model: система сначала строит bounded investigation plan, затем вызывает retrieval/tools и формирует итоговый report.
+- Элементы `ReAct` присутствуют в цикле `plan -> tool -> observe -> decide`, где результаты инструментов меняют дальнейшие hypotheses и next steps.
+- Chain-of-thought как отдельный продуктовый артефакт не экспонируется: система хранит только trace summaries, observations, refs и structured outputs.
+
+Такой выбор сделан потому, что для infra-oriented PoC он:
+- проще в реализации и отладке, чем graph-based orchestration;
+- лучше контролируется по latency, retries и safety;
+- удобнее для structured tracing, evals и failure analysis;
+- снижает риск orchestration drift по сравнению с multi-agent setup.
+
+### 2.2 Alternatives Considered
+
+На этапе проектирования были рассмотрены, но не выбраны следующие альтернативы:
+
+1. **Graph-based orchestration**
+   - даёт более гибкое branching behavior;
+   - но для текущего PoC добавляет лишнюю orchestration complexity, усложняет debugging и не даёт критического выигрыша при bounded triage flow.
+
+2. **Multi-agent architecture**
+   - потенциально полезна для разделения ролей (planner, investigator, safety reviewer);
+   - но для PoC повышает cost, latency и coordination overhead, а также усложняет observability и eval reproducibility.
+
+3. **Pure linear single-pass pipeline**
+   - проще всего в реализации;
+   - но хуже адаптируется к conflicting evidence, fallback paths и partial completion semantics.
+
+В результате выбран single-agent bounded loop, который даёт лучший баланс между простотой, наблюдаемостью и качеством triage.
+
+---
+
 ## 3. System Modules
 
 ### 3.1 API Layer
@@ -269,6 +303,22 @@ Logical names в high-level документах:
 PoC рассчитан на mock/fixture mode, поэтому реальные production integrations не требуются для демонстрации дизайна.
 
 ---
+
+### 7.6 Prompting and Prompt Governance
+
+LLM interaction в PoC строится вокруг нескольких prompt layers:
+- system prompt с policy, safety rules и response schema;
+- orchestration prompt для planning / analysis;
+- tool-context prompt, который включает только bounded sanitized observations и retrieval snippets.
+
+Базовые правила prompt engineering:
+- prompt обязан поддерживать `cite-or-ask` поведение;
+- недоверенные данные из logs и KB не должны интерпретироваться как инструкции;
+- response format должен оставаться structured и machine-readable;
+- prompts versioned вместе с кодом и документацией PoC.
+
+Для текущего PoC A/B testing prompt variants не является обязательным. Изменения в prompts предполагается проверять через фиксированный eval set и regression review перед merge в основную ветку.
+
 
 ## 8. Failure Modes, Fallbacks and Guardrails
 
