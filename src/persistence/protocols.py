@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from src.domain.enums import SessionStatus
@@ -8,6 +9,7 @@ from src.domain.schemas import (
     ApprovalRequest,
     FinalReport,
     IncidentInput,
+    InvestigationPlanView,
     Observation,
     SessionView,
     ToolCallRecord,
@@ -66,6 +68,22 @@ class SessionRepository(Protocol):
         approval_input: ApprovalInput,
     ) -> SessionView:
         ...
+
+    def update_session_state(
+        self,
+        session_id: str,
+        *,
+        budget_remaining: int | None = None,
+        failure_reason: str | None = None,
+    ) -> SessionView:
+        ...
+
+    def update_investigation_plan(
+        self,
+        session_id: str,
+        plan: InvestigationPlanView,
+    ) -> SessionView:
+        ...
     
     def append_trace(
         self,
@@ -74,6 +92,7 @@ class SessionRepository(Protocol):
         status: str,
         details: str,
         metadata: dict[str, str] | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
         ...
-

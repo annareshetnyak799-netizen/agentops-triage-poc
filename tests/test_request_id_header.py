@@ -20,3 +20,4 @@ def test_request_id_header_is_present_on_metrics_response() -> None:
     assert response.status_code == 200
     assert "X-Request-ID" in response.headers
     assert response.headers["X-Request-ID"]
+    assert response.headers["content-type"].startswith("text/plain")

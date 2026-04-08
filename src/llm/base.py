@@ -4,6 +4,14 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field
 
+LLM_PROVIDER_FAILURE_SUMMARY = (
+    "LLM provider call failed. Returning a safe degraded triage summary."
+)
+LLM_UNSTRUCTURED_OUTPUT_SUMMARY = (
+    "Structured LLM output was unavailable. "
+    "Returning a safe fallback summary based on the current incident context."
+)
+
 
 class LLMAnalysisInput(BaseModel):
     prompt: str = Field(min_length=1)
@@ -29,3 +37,10 @@ class BaseLLMAdapter(ABC):
     async def analyze(self, payload: LLMAnalysisInput) -> LLMAnalysisOutput:
         raise NotImplementedError
 
+
+def classify_llm_outcome(output: LLMAnalysisOutput) -> str:
+    if output.summary == LLM_PROVIDER_FAILURE_SUMMARY:
+        return "provider_fallback"
+    if output.summary == LLM_UNSTRUCTURED_OUTPUT_SUMMARY:
+        return "unstructured_fallback"
+    return "structured_success"

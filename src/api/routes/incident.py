@@ -1,56 +1,81 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from src.domain.schemas import ApprovalInput, ApprovalView, IncidentInput, SessionView, TraceStep
+from src.api.contracts import SuccessEnvelope, success_envelope
+from src.api.dependencies import get_orchestrator, get_repository
+from src.api.serializers import (
+    serialize_approval,
+    serialize_incident_result,
+    serialize_session,
+    serialize_trace,
+)
+from src.domain.schemas import ApprovalInput, ApprovalView, IncidentInput
 from src.orchestrator.service import OrchestratorService
-from src.persistence.factory import create_session_repository
+from src.persistence.protocols import SessionRepository
 
 router = APIRouter(prefix="", tags=["incident"])
-
-repository = create_session_repository()
-orchestrator = OrchestratorService(repository=repository)
 
 
 @router.post(
     "/incident",
-    response_model=SessionView,
+    response_model=SuccessEnvelope,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_incident_session(incident: IncidentInput) -> SessionView:
+async def create_incident_session(
+    incident: IncidentInput,
+    repository: SessionRepository = Depends(get_repository),
+    orchestrator: OrchestratorService = Depends(get_orchestrator),
+) -> dict[str, object]:
     session = repository.create_session(incident)
     session = await orchestrator.run_initial_triage(session.session_id)
-    return session
+    return success_envelope(
+        serialize_incident_result(session),
+        session_id=session.session_id,
+    )
 
 
-@router.get("/sessions/{session_id}", response_model=SessionView)
-async def get_session(session_id: str) -> SessionView:
+@router.get("/sessions/{session_id}", response_model=SuccessEnvelope)
+async def get_session(
+    session_id: str,
+    repository: SessionRepository = Depends(get_repository),
+) -> dict[str, object]:
     session = repository.get_session(session_id)
     if session is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}",
         )
-    return session
+    return success_envelope(
+        serialize_session(session),
+        session_id=session.session_id,
+    )
 
 
-@router.get("/sessions/{session_id}/trace", response_model=list[TraceStep])
-async def get_session_trace(session_id: str) -> list[TraceStep]:
+@router.get("/sessions/{session_id}/trace", response_model=SuccessEnvelope)
+async def get_session_trace(
+    session_id: str,
+    repository: SessionRepository = Depends(get_repository),
+) -> dict[str, object]:
     trace = repository.get_trace(session_id)
     if trace is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}",
         )
-    return trace
+    return success_envelope(
+        serialize_trace(session_id, trace),
+        session_id=session_id,
+    )
 
 
 @router.post(
     "/sessions/{session_id}/approval",
-    response_model=ApprovalView,
+    response_model=SuccessEnvelope,
 )
 async def approve_session(
     session_id: str,
     approval_input: ApprovalInput,
-) -> ApprovalView:
+    repository: SessionRepository = Depends(get_repository),
+) -> dict[str, object]:
     try:
         session = repository.apply_approval(session_id, approval_input)
     except KeyError as exc:
@@ -64,12 +89,13 @@ async def approve_session(
             detail=str(exc),
         ) from exc
 
-    return ApprovalView(
+    approval = ApprovalView(
         session_id=session.session_id,
         status=session.status,
         decision=approval_input.decision,
         comment=approval_input.comment,
     )
-
-
-
+    return success_envelope(
+        serialize_approval(approval, session),
+        session_id=session.session_id,
+    )

@@ -2,11 +2,13 @@ import pytest
 
 from src.llm.base import LLMAnalysisInput
 from src.llm.mock_adapter import MockLLMAdapter
+from src.observability.metrics import metrics_registry
 
 
 @pytest.mark.anyio
 async def test_mock_llm_adapter_returns_structured_analysis() -> None:
     adapter = MockLLMAdapter()
+    success_before = metrics_registry.get("llm_structured_success_total")
 
     result = await adapter.analyze(
         LLMAnalysisInput(
@@ -28,6 +30,7 @@ async def test_mock_llm_adapter_returns_structured_analysis() -> None:
     assert "payments-api" in result.summary
     assert len(result.hypotheses) >= 1
     assert len(result.next_steps) >= 1
+    assert metrics_registry.get("llm_structured_success_total") == success_before + 1
 
 
 @pytest.mark.anyio

@@ -1,33 +1,47 @@
 from fastapi import APIRouter
+from starlette.responses import PlainTextResponse
 
+from src.api.contracts import SuccessEnvelope, success_envelope
+from src.api.serializers import serialize_health, serialize_root
 from src.config import settings
-from src.domain.schemas import HealthResponse, RootResponse
 from src.observability.metrics import metrics_registry
 
 router = APIRouter(tags=["health"])
 
 
-@router.get("/", response_model=RootResponse)
-async def root() -> RootResponse:
-    return RootResponse(
-        service=settings.app_name,
-        version="0.1.0",
-        environment=settings.environment,
-        docs_url="/docs",
-        health_url="/health",
-        metrics_url="/metrics",
+def render_metrics(snapshot: dict[str, int]) -> str:
+    lines = [f"agentops_{name} {value}" for name, value in sorted(snapshot.items())]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+@router.get("/", response_model=SuccessEnvelope)
+async def root() -> dict[str, object]:
+    return success_envelope(
+        serialize_root(
+            service=settings.app_name,
+            version="0.1.0",
+            environment=settings.environment,
+            docs_url="/docs",
+            health_url="/health",
+            metrics_url="/metrics",
+        ),
     )
 
 
-@router.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(
-        status="ok",
-        service=settings.app_name,
-        environment=settings.environment,
+@router.get("/health", response_model=SuccessEnvelope)
+async def health() -> dict[str, object]:
+    return success_envelope(
+        serialize_health(
+            service=settings.app_name,
+            version="0.1.0",
+            environment=settings.environment,
+        )
     )
 
 
-@router.get("/metrics", response_model=dict[str, int])
-async def metrics() -> dict[str, int]:
-    return metrics_registry.snapshot()
+@router.get("/metrics", response_class=PlainTextResponse)
+async def metrics() -> PlainTextResponse:
+    return PlainTextResponse(
+        render_metrics(metrics_registry.snapshot()),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )

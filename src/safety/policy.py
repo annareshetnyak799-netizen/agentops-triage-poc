@@ -46,13 +46,18 @@ def evaluate_next_steps(next_steps: list[str]) -> PolicyCheckResult:
     recommended_action, trigger = find_risky_action(next_steps)
     requires_approval = recommended_action is not None
 
-    notes = ["No write actions were executed."]
+    notes = ["No write or risky actions were executed automatically."]
 
     if requires_approval:
-        notes.append(
-            "One or more recommended steps may modify system state and "
-            "require explicit human approval."
-        )
+        if trigger == "rollback":
+            notes.append(
+                "Rollback suggestion is gated and requires explicit human approval."
+            )
+        else:
+            notes.append(
+                "One or more recommended steps may modify system state and "
+                "require explicit human approval."
+            )
 
     return PolicyCheckResult(
         blocked=False,

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from src.llm.base import BaseLLMAdapter, LLMAnalysisInput, LLMAnalysisOutput
+from src.observability.metrics import metrics_registry
 
 
 class MockLLMAdapter(BaseLLMAdapter):
     async def analyze(self, payload: LLMAnalysisInput) -> LLMAnalysisOutput:
+        metrics_registry.increment("llm_calls_total")
+        metrics_registry.increment("llm_structured_success_total")
         rollback_needed = "rollback" in payload.summary.lower()
 
         next_steps = [

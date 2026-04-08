@@ -68,6 +68,15 @@ def format_status_result(actual_status: str, acceptable_statuses: tuple[str, ...
     return f"{marker}: {actual_status} (acceptable: {expected})"
 
 
+def unwrap_success(payload: dict[str, object]) -> dict[str, object]:
+    if payload.get("status") != "ok":
+        raise SystemExit(f"Unexpected API response: {payload}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise SystemExit(f"Unexpected API response payload: {payload}")
+    return data
+
+
 def main() -> int:
     args = parse_args()
     scenarios = select_scenarios(args.scenario_names)
@@ -78,12 +87,12 @@ def main() -> int:
 
             response = client.post("/incident", json=scenario.payload)
             response.raise_for_status()
-            session = response.json()
+            session = unwrap_success(response.json())
             session_id = session["session_id"]
 
             trace_response = client.get(f"/sessions/{session_id}/trace")
             trace_response.raise_for_status()
-            trace = trace_response.json()
+            trace = unwrap_success(trace_response.json())["trace"]
 
             llm_step = next(
                 (step for step in trace if step["step_type"] == "llm_analysis"),
@@ -94,18 +103,33 @@ def main() -> int:
                 None,
             )
 
-            final_report = session.get("final_report") or {}
-            approval_request = session.get("approval_request")
+            report = session.get("report") or {}
+            approval_requests = report.get("approval_requests", [])
 
             print(
                 "status: "
-                f"{format_status_result(session['status'], scenario.acceptable_statuses)}"
+                f"{format_status_result(report.get('status', 'unknown'), scenario.acceptable_statuses)}"
             )
-            print(f"service: {session['incident']['service']}")
-            print(f"refs: {format_items(final_report.get('refs', []))}")
-            print(f"summary: {final_report.get('summary', 'missing')}")
-            print(f"hypotheses: {format_items(final_report.get('hypotheses', []))}")
-            print(f"next_steps: {format_items(final_report.get('next_steps', []))}")
+            print(f"service: {report.get('incident_summary', {}).get('service', 'unknown')}")
+            print(
+                "refs: "
+                f"{format_items(ref.get('snippet', 'missing') for ref in report.get('refs', []))}"
+            )
+            incident_summary = report.get("incident_summary", {})
+            print(
+                "summary: "
+                f"{incident_summary.get('title', 'missing')} "
+                f"service={incident_summary.get('service', 'unknown')} "
+                f"severity={incident_summary.get('severity', 'unknown')}"
+            )
+            print(
+                "hypotheses: "
+                f"{format_items(item.get('statement', 'missing') for item in report.get('hypotheses', []))}"
+            )
+            print(
+                "next_steps: "
+                f"{format_items(item.get('action', 'missing') for item in report.get('next_steps', []))}"
+            )
 
             if llm_step is not None:
                 metadata = llm_step.get("metadata", {})
@@ -117,9 +141,10 @@ def main() -> int:
                     f"structured={metadata.get('structured_output', 'unknown')}"
                 )
 
-            if approval_request is not None:
+            if approval_requests:
+                approval_request = approval_requests[0]
                 print(f"approval_reason: {approval_request['reason']}")
-                print(f"approval_action: {approval_request['recommended_action']}")
+                print(f"approval_action: {approval_request['action_type']}")
 
             if policy_step is not None:
                 policy_metadata = policy_step.get("metadata", {})

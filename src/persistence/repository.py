@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from src.config import settings
 from src.domain.enums import ApprovalDecision, SessionStatus
 from src.domain.schemas import (
     ApprovalInput,
     ApprovalRequest,
     FinalReport,
     IncidentInput,
+    InvestigationPlanView,
     Observation,
+    SafetyEventView,
     SessionView,
     ToolCallRecord,
     TraceStep,
@@ -31,10 +34,11 @@ class InMemorySessionRepository:
             status=SessionStatus.NEW,
             created_at=now,
             updated_at=now,
+            llm_provider=settings.llm_provider,
+            policy_mode="strict",
             incident=incident,
         )
-        self._sessions[session.session_id] = session
-        self._traces[session.session_id] = [
+        trace = [
             TraceStep(
                 step_type="session_created",
                 status=SessionStatus.NEW.value,
@@ -45,6 +49,9 @@ class InMemorySessionRepository:
                 },
             )
         ]
+        self._sync_session_state(session, trace_len=len(trace))
+        self._sessions[session.session_id] = session
+        self._traces[session.session_id] = trace
         return deepcopy(session)
 
     def get_session(self, session_id: str) -> SessionView | None:
@@ -72,6 +79,10 @@ class InMemorySessionRepository:
         validate_transition(session.status, next_status)
         session.status = next_status
         session.updated_at = datetime.now(UTC)
+        self._sync_session_state(
+            session,
+            trace_len=len(self._traces.get(session_id, [])),
+        )
         self.append_trace(
             session_id=session_id,
             step_type="status_transition",
@@ -102,7 +113,57 @@ class InMemorySessionRepository:
             details=f"Added observation from {observation.source}.",
             metadata={
                 "source": observation.source,
+                "source_type": observation.source_type or "",
+                "source_ref": observation.source_ref or "",
+                "confidence": (
+                    f"{observation.confidence:.2f}" if observation.confidence is not None else ""
+                ),
+                "observed_at": observation.observed_at.isoformat() if observation.observed_at else "",
                 "refs_count": str(len(observation.refs)),
+            },
+        )
+        return deepcopy(session)
+
+    def update_session_state(
+        self,
+        session_id: str,
+        *,
+        budget_remaining: int | None = None,
+        failure_reason: str | None = None,
+    ) -> SessionView:
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"Session not found: {session_id}")
+
+        session.budget_remaining = budget_remaining
+        session.failure_reason = failure_reason
+        session.updated_at = datetime.now(UTC)
+        self._sync_session_state(
+            session,
+            trace_len=len(self._traces.get(session_id, [])),
+        )
+        return deepcopy(session)
+
+    def update_investigation_plan(
+        self,
+        session_id: str,
+        plan: InvestigationPlanView,
+    ) -> SessionView:
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"Session not found: {session_id}")
+
+        session.investigation_plan = plan
+        session.updated_at = datetime.now(UTC)
+        self.append_trace(
+            session_id=session_id,
+            step_type="planning",
+            status=plan.status,
+            details="Investigation plan stored.",
+            metadata={
+                "plan_id": plan.plan_id,
+                "plan_version": str(plan.version),
+                "steps_count": str(len(plan.steps)),
             },
         )
         return deepcopy(session)
@@ -118,16 +179,29 @@ class InMemorySessionRepository:
 
         session.tool_calls.append(tool_call)
         session.updated_at = datetime.now(UTC)
-        self.append_trace(
-            session_id=session_id,
-            step_type="tool_call",
-            status=tool_call.status.value,
-            details=f"Executed {tool_call.tool_name}.",
-            metadata={
-                "tool_name": tool_call.tool_name,
-                "latency_ms": str(tool_call.latency_ms),
-                "error_type": tool_call.error_type or "",
-            },
+        completed_at = datetime.now(UTC)
+        started_at = completed_at - timedelta(milliseconds=tool_call.latency_ms)
+        self._traces.setdefault(session_id, []).append(
+            TraceStep(
+                step_type="tool_call",
+                status=tool_call.status.value,
+                details=f"Executed {tool_call.tool_name}.",
+                started_at=started_at,
+                completed_at=completed_at,
+                metadata={
+                    "tool_call_id": tool_call.tool_call_id or "",
+                    "tool_name": tool_call.tool_name,
+                    "normalized_status": tool_call.normalized_status or "",
+                    "started_at": tool_call.started_at.isoformat(),
+                    "completed_at": tool_call.completed_at.isoformat()
+                    if tool_call.completed_at is not None
+                    else "",
+                    "latency_ms": str(tool_call.latency_ms),
+                    "error_code": tool_call.error_code or "",
+                    "error_type": tool_call.error_type or "",
+                    "has_normalized_output": str(bool(tool_call.normalized_output)).lower(),
+                },
+            )
         )
         return deepcopy(session)
 
@@ -141,6 +215,7 @@ class InMemorySessionRepository:
             raise KeyError(f"Session not found: {session_id}")
 
         session.final_report = final_report
+        session.safety_events = list(final_report.safety_note_items)
         session.updated_at = datetime.now(UTC)
         self.append_trace(
             session_id=session_id,
@@ -166,6 +241,7 @@ class InMemorySessionRepository:
 
         session.approval_request = approval_request
         session.updated_at = datetime.now(UTC)
+        session.waiting_for_approval = True
         self.append_trace(
             session_id=session_id,
             step_type="approval_request",
@@ -188,14 +264,45 @@ class InMemorySessionRepository:
 
         if session.status != SessionStatus.WAITING_APPROVAL:
             raise ValueError("Approval can only be applied in waiting_approval state.")
+        if session.approval_request is None or session.approval_request.approval_id is None:
+            raise ValueError("No pending approval request exists for this session.")
+        if approval_input.approval_id != session.approval_request.approval_id:
+            raise ValueError("Approval ID does not match the pending approval request.")
 
         self._approval_inputs[session_id] = approval_input
+        session.approval_request.status = approval_input.decision.value
+        session.iteration_count += 1
+        session.updated_at = datetime.now(UTC)
+        if session.final_report is not None:
+            if approval_input.decision == ApprovalDecision.APPROVED:
+                note = "Action was human-approved before continuation."
+                severity = "low"
+            else:
+                note = "Suggested action was human-rejected and automatic continuation was limited."
+                severity = "medium"
+            session.final_report.safety_notes.append(note)
+            session.final_report.safety_note_items.append(
+                SafetyEventView(
+                    safety_event_id=str(
+                        uuid4()
+                    ),
+                    session_id=session.session_id,
+                    type="policy",
+                    message=note,
+                    severity=severity,
+                    related_ref="trace:approval_decision",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            session.safety_events = list(session.final_report.safety_note_items)
+        session.approval_request = None
 
         next_status = (
             SessionStatus.COMPLETED
             if approval_input.decision == ApprovalDecision.APPROVED
             else SessionStatus.PARTIAL_COMPLETED
         )
+        self._sessions[session_id] = session
         session = self.update_status(session_id, next_status)
         self.append_trace(
             session_id=session_id,
@@ -203,7 +310,10 @@ class InMemorySessionRepository:
             status=approval_input.decision.value,
             details=approval_input.comment or "Approval decision recorded.",
             metadata={
+                "approval_id": approval_input.approval_id,
                 "decision": approval_input.decision.value,
+                "resulting_status": next_status.value,
+                "comment_present": str(approval_input.comment is not None).lower(),
             },
         )
         return session
@@ -215,15 +325,33 @@ class InMemorySessionRepository:
         status: str,
         details: str,
         metadata: dict[str, str] | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
-        self._traces.setdefault(session_id, []).append(
+        trace = self._traces.setdefault(session_id, [])
+        trace.append(
             TraceStep(
                 step_type=step_type,
                 status=status,
                 details=details,
+                started_at=started_at or datetime.now(UTC),
+                completed_at=completed_at or datetime.now(UTC),
                 metadata=metadata or {},
             )
         )
+        session = self._sessions.get(session_id)
+        if session is not None:
+            self._sync_session_state(session, trace_len=len(trace))
 
-
-
+    @staticmethod
+    def _sync_session_state(session: SessionView, *, trace_len: int) -> None:
+        session.last_completed_step = trace_len
+        session.waiting_for_approval = session.status == SessionStatus.WAITING_APPROVAL
+        session.partial_result = session.status == SessionStatus.PARTIAL_COMPLETED
+        if session.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.PARTIAL_COMPLETED,
+        }:
+            session.completed_at = session.completed_at or datetime.now(UTC)
+        else:
+            session.completed_at = None

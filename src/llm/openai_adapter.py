@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from openai import APIError, APITimeoutError, AsyncOpenAI
 
-from src.llm.base import BaseLLMAdapter, LLMAnalysisInput, LLMAnalysisOutput
+from src.llm.base import (
+    BaseLLMAdapter,
+    LLMAnalysisInput,
+    LLMAnalysisOutput,
+    LLM_PROVIDER_FAILURE_SUMMARY,
+    LLM_UNSTRUCTURED_OUTPUT_SUMMARY,
+)
+from src.observability.metrics import metrics_registry
 
 
 class OpenAIRealLLMAdapter(BaseLLMAdapter):
@@ -27,6 +34,7 @@ class OpenAIRealLLMAdapter(BaseLLMAdapter):
         return "openai"
 
     async def analyze(self, payload: LLMAnalysisInput) -> LLMAnalysisOutput:
+        metrics_registry.increment("llm_calls_total")
         try:
             response = await self._client.responses.parse(
                 model=self._model,
@@ -52,10 +60,11 @@ class OpenAIRealLLMAdapter(BaseLLMAdapter):
                 text_format=LLMAnalysisOutput,
             )
         except (APIError, APITimeoutError) as exc:
+            metrics_registry.increment("llm_calls_failed")
+            metrics_registry.increment("fallback_total")
+            metrics_registry.increment("llm_fallback_total")
             return LLMAnalysisOutput(
-                summary=(
-                    "LLM provider call failed. Returning a safe degraded triage summary."
-                ),
+                summary=LLM_PROVIDER_FAILURE_SUMMARY,
                 hypotheses=[
                     f"Provider call failed: {exc.__class__.__name__}.",
                 ],
@@ -67,13 +76,13 @@ class OpenAIRealLLMAdapter(BaseLLMAdapter):
 
         parsed = response.output_parsed
         if parsed is not None:
+            metrics_registry.increment("llm_structured_success_total")
             return parsed
 
+        metrics_registry.increment("fallback_total")
+        metrics_registry.increment("llm_fallback_total")
         return LLMAnalysisOutput(
-            summary=(
-                "Structured LLM output was unavailable. "
-                "Returning a safe fallback summary based on the current incident context."
-            ),
+            summary=LLM_UNSTRUCTURED_OUTPUT_SUMMARY,
             hypotheses=[
                 "Provider returned an unstructured or unparsable response.",
             ],
@@ -82,5 +91,3 @@ class OpenAIRealLLMAdapter(BaseLLMAdapter):
                 "Retry triage or switch to mock backend for debugging.",
             ],
         )
-
-
