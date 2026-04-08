@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy import select
 
@@ -14,6 +14,7 @@ from src.domain.schemas import (
     ApprovalRequest,
     FinalReport,
     IncidentInput,
+    IncidentRecordView,
     InvestigationPlanView,
     Observation,
     SafetyEventView,
@@ -35,14 +36,36 @@ class SQLiteSessionRepository(SessionRepository):
 
     def create_session(self, incident: IncidentInput) -> SessionView:
         now = datetime.now(UTC)
+        incident_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"incident:{incident.service}:{incident.timestamp.isoformat()}:{incident.title}",
+            )
+        )
+        incident_record = IncidentRecordView(
+            incident_id=incident_id,
+            title=incident.title,
+            service=incident.service,
+            severity=incident.severity,
+            timestamp=incident.timestamp,
+            summary=incident.summary,
+            signals=incident.signals,
+            environment=incident.environment,
+            reporter=incident.reporter,
+            alert_payload=incident.alert_payload,
+            links=incident.links,
+            created_at=now,
+        )
         session = SessionView(
             session_id=str(uuid4()),
+            incident_id=incident_id,
             status=SessionStatus.NEW,
             created_at=now,
             updated_at=now,
             llm_provider=settings.llm_provider,
             policy_mode="strict",
             incident=incident,
+            incident_record=incident_record,
         )
         trace = [
             TraceStep(
@@ -211,6 +234,7 @@ class SQLiteSessionRepository(SessionRepository):
     ) -> SessionView:
         session, trace = self._load_session_and_trace(session_id)
 
+        final_report.normalize_legacy_fields()
         session.final_report = final_report
         session.safety_events = list(final_report.safety_note_items)
         session.updated_at = datetime.now(UTC)

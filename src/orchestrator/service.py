@@ -268,10 +268,6 @@ class OrchestratorService:
 
         report = FinalReport(
             summary=redact_text(llm_result.summary),
-            hypotheses=redact_list(llm_result.hypotheses),
-            next_steps=redact_list(llm_result.next_steps),
-            refs=refs,
-            safety_notes=redact_list(report_safety_notes),
             unknowns=self._build_unknowns(
                 status=session.status,
                 refs=refs,
@@ -282,6 +278,7 @@ class OrchestratorService:
             ref_items=ref_items,
             safety_note_items=safety_note_items,
         )
+        report.normalize_legacy_fields()
 
         session = self._repository.set_final_report(
             session_id=session.session_id,
@@ -513,16 +510,23 @@ class OrchestratorService:
         ]
         report = FinalReport(
             summary="Partial triage result generated.",
-            hypotheses=["Insufficient evidence for a confident conclusion."],
-            next_steps=["Collect more telemetry and rerun triage."],
-            refs=[],
-            safety_notes=safety_notes,
             unknowns=[reason],
+            hypothesis_items=self._build_hypothesis_items(
+                session_id=session.session_id,
+                hypotheses=["Insufficient evidence for a confident conclusion."],
+                ref_items=[],
+                weakly_grounded=True,
+            ),
+            next_step_items=self._build_next_step_items(
+                next_steps=["Collect more telemetry and rerun triage."],
+                recommended_action=None,
+            ),
             safety_note_items=self._build_safety_note_items(
                 session.session_id,
                 safety_notes,
             ),
         )
+        report.normalize_legacy_fields()
         session = self._repository.set_final_report(
             session_id=session.session_id,
             final_report=report,

@@ -1,7 +1,16 @@
 from datetime import UTC, datetime
 
 from src.domain.enums import SessionStatus, Severity
-from src.domain.schemas import IncidentInput, Observation, SessionView
+from src.domain.schemas import (
+    FinalReport,
+    HypothesisView,
+    IncidentInput,
+    NextStepView,
+    Observation,
+    ReferenceView,
+    SafetyEventView,
+    SessionView,
+)
 from src.orchestrator.context import build_session_context
 from src.safety.sanitization import UNTRUSTED_INSTRUCTION_TOKEN
 
@@ -87,3 +96,58 @@ def test_build_session_context_sanitizes_instruction_like_input() -> None:
     assert UNTRUSTED_INSTRUCTION_TOKEN in context.summary
     assert "Ignore previous instructions" not in context.summary
     assert UNTRUSTED_INSTRUCTION_TOKEN in context.observations[0]
+
+
+def test_final_report_normalizes_legacy_fields_from_structured_items() -> None:
+    report = FinalReport(
+        summary="Structured report.",
+        hypothesis_items=[
+            HypothesisView(
+                id="hyp-1",
+                statement="Deployment likely caused the regression.",
+                source="llm_analysis",
+                confidence=0.8,
+                status="active",
+                supporting_refs=["obs-1"],
+            )
+        ],
+        next_step_items=[
+            NextStepView(
+                priority=1,
+                action="Inspect deployment logs.",
+                source="llm_analysis",
+                rationale="Correlates with incident timing.",
+                requires_approval=False,
+            )
+        ],
+        ref_items=[
+            ReferenceView(
+                id="kb-1",
+                type="kb_doc",
+                source="runbook_retrieval_tool",
+                title="payments-api.md",
+                snippet="runbooks/payments-api.md",
+                target_ref="runbooks/payments-api.md",
+            )
+        ],
+        safety_note_items=[
+            SafetyEventView(
+                safety_event_id="safe-1",
+                session_id="session-1",
+                type="uncertainty",
+                message="Root cause is not confirmed yet; hypotheses are evidence-backed but preliminary.",
+                severity="low",
+                related_ref="report",
+                created_at=datetime.now(UTC),
+            )
+        ],
+    )
+
+    report.normalize_legacy_fields()
+
+    assert report.hypotheses == ["Deployment likely caused the regression."]
+    assert report.next_steps == ["Inspect deployment logs."]
+    assert report.refs == ["runbooks/payments-api.md"]
+    assert report.safety_notes == [
+        "Root cause is not confirmed yet; hypotheses are evidence-backed but preliminary."
+    ]

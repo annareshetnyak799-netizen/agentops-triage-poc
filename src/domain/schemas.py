@@ -38,6 +38,23 @@ class IncidentSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class IncidentRecordView(BaseModel):
+    incident_id: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=200)
+    service: str = Field(min_length=1, max_length=100)
+    severity: Severity
+    timestamp: datetime
+    summary: str = Field(min_length=1, max_length=2_000)
+    signals: list[str] = Field(default_factory=list)
+    environment: str | None = Field(default=None, max_length=50)
+    reporter: str | None = Field(default=None, max_length=100)
+    alert_payload: dict[str, Any] = Field(default_factory=dict)
+    links: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class Observation(BaseModel):
     observation_id: str | None = Field(default=None, max_length=200)
     source: str = Field(min_length=1, max_length=100)
@@ -104,6 +121,19 @@ class FinalReport(BaseModel):
     safety_note_items: list[SafetyEventView] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
+
+    def normalize_legacy_fields(self) -> None:
+        if self.hypothesis_items:
+            self.hypotheses = [item.statement for item in self.hypothesis_items]
+        if self.next_step_items:
+            self.next_steps = [item.action for item in self.next_step_items]
+        if self.ref_items:
+            self.refs = [
+                item.target_ref or item.snippet or item.title or item.id
+                for item in self.ref_items
+            ]
+        if self.safety_note_items:
+            self.safety_notes = [item.message for item in self.safety_note_items]
 
 
 class HypothesisView(BaseModel):
@@ -217,6 +247,7 @@ class SessionStateView(BaseModel):
 
 class SessionView(BaseModel):
     session_id: str
+    incident_id: str | None = Field(default=None, max_length=200)
     status: SessionStatus
     created_at: datetime
     updated_at: datetime
@@ -230,6 +261,7 @@ class SessionView(BaseModel):
     partial_result: bool = False
     failure_reason: str | None = Field(default=None, max_length=2_000)
     incident: IncidentInput
+    incident_record: IncidentRecordView | None = None
     investigation_plan: InvestigationPlanView | None = None
     observations: list[Observation] = Field(default_factory=list)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
@@ -275,6 +307,8 @@ class ApprovalView(BaseModel):
 
 class IncidentResponseData(BaseModel):
     session_id: str
+    incident_id: str = Field(min_length=1, max_length=200)
+    incident: IncidentRecordView
     lifecycle_state: SessionStatus
     session_state: SessionStateView
     investigation_plan: InvestigationPlanView | None = None
@@ -286,6 +320,8 @@ class IncidentResponseData(BaseModel):
 
 class SessionResponseData(BaseModel):
     session_id: str
+    incident_id: str = Field(min_length=1, max_length=200)
+    incident: IncidentRecordView
     lifecycle_state: SessionStatus
     created_at: datetime
     updated_at: datetime

@@ -10,6 +10,7 @@ from src.domain.schemas import (
     ApprovalView,
     FinalReport,
     HypothesisView,
+    IncidentRecordView,
     IncidentResponseData,
     IncidentSummary,
     NextStepView,
@@ -99,14 +100,11 @@ def _hypothesis_status(index: int, *, weakly_grounded: bool = False) -> str:
     return "weakened"
 
 
-def _serialize_hypotheses(
+def _legacy_hypotheses_to_items(
     session: SessionView,
     report: FinalReport,
 ) -> list[HypothesisView]:
-    if report.hypothesis_items:
-        return report.hypothesis_items
-
-    supporting_refs = [ref.id for ref in _serialize_refs(session, report)]
+    supporting_refs = [ref.id for ref in (report.ref_items or _legacy_refs_to_items(report))]
     hypotheses: list[HypothesisView] = []
     weakly_grounded = _weakly_grounded(report)
 
@@ -130,10 +128,7 @@ def _serialize_hypotheses(
     return hypotheses
 
 
-def _serialize_next_steps(report: FinalReport) -> list[NextStepView]:
-    if report.next_step_items:
-        return report.next_step_items
-
+def _legacy_next_steps_to_items(report: FinalReport) -> list[NextStepView]:
     risky_action, _ = find_risky_action(report.next_steps)
     next_steps: list[NextStepView] = []
 
@@ -151,10 +146,7 @@ def _serialize_next_steps(report: FinalReport) -> list[NextStepView]:
     return next_steps
 
 
-def _serialize_refs(session: SessionView, report: FinalReport) -> list[ReferenceView]:
-    if report.ref_items:
-        return report.ref_items
-
+def _legacy_refs_to_items(report: FinalReport) -> list[ReferenceView]:
     refs: list[ReferenceView] = []
     for index, ref in enumerate(report.refs, start=1):
         refs.append(
@@ -209,13 +201,30 @@ def _serialize_investigation_plan(session: SessionView):
     return session.investigation_plan
 
 
-def _serialize_safety_notes(
+def _serialize_incident_record(session: SessionView) -> IncidentRecordView:
+    if session.incident_record is not None:
+        return session.incident_record
+
+    return IncidentRecordView(
+        incident_id=session.incident_id or f"incident:{session.session_id}",
+        title=session.incident.title,
+        service=session.incident.service,
+        severity=session.incident.severity,
+        timestamp=session.incident.timestamp,
+        summary=session.incident.summary,
+        signals=session.incident.signals,
+        environment=session.incident.environment,
+        reporter=session.incident.reporter,
+        alert_payload=session.incident.alert_payload,
+        links=session.incident.links,
+        created_at=session.created_at,
+    )
+
+
+def _legacy_safety_notes_to_items(
     session: SessionView,
     report: FinalReport,
 ) -> list[SafetyEventView]:
-    if report.safety_note_items:
-        return report.safety_note_items
-
     notes: list[SafetyEventView] = []
 
     for index, note in enumerate(report.safety_notes, start=1):
@@ -306,6 +315,11 @@ def _serialize_unknowns(session: SessionView, report: FinalReport) -> list[str]:
 
 def serialize_report(session: SessionView) -> dict[str, object]:
     report = session.final_report or FinalReport(summary="No triage report available.")
+    report.normalize_legacy_fields()
+    refs = report.ref_items or _legacy_refs_to_items(report)
+    hypotheses = report.hypothesis_items or _legacy_hypotheses_to_items(session, report)
+    next_steps = report.next_step_items or _legacy_next_steps_to_items(report)
+    safety_notes = report.safety_note_items or _legacy_safety_notes_to_items(session, report)
     triage_report = {
         "incident_summary": IncidentSummary(
             title=session.incident.title,
@@ -314,13 +328,10 @@ def serialize_report(session: SessionView) -> dict[str, object]:
         ).model_dump(mode="json"),
         "summary": report.summary,
         "status": session.status.value,
-        "hypotheses": [item.model_dump(mode="json") for item in _serialize_hypotheses(session, report)],
-        "next_steps": [item.model_dump(mode="json") for item in _serialize_next_steps(report)],
-        "refs": [item.model_dump(mode="json") for item in _serialize_refs(session, report)],
-        "safety_notes": [
-            item.model_dump(mode="json")
-            for item in _serialize_safety_notes(session, report)
-        ],
+        "hypotheses": [item.model_dump(mode="json") for item in hypotheses],
+        "next_steps": [item.model_dump(mode="json") for item in next_steps],
+        "refs": [item.model_dump(mode="json") for item in refs],
+        "safety_notes": [item.model_dump(mode="json") for item in safety_notes],
         "approval_requests": [
             item.model_dump(mode="json") for item in _serialize_approval_requests(session)
         ],
@@ -332,6 +343,8 @@ def serialize_report(session: SessionView) -> dict[str, object]:
 def serialize_incident_result(session: SessionView) -> dict[str, object]:
     return IncidentResponseData(
         session_id=session.session_id,
+        incident_id=session.incident_id or _serialize_incident_record(session).incident_id,
+        incident=_serialize_incident_record(session),
         lifecycle_state=session.status,
         session_state=_serialize_session_state(session),
         investigation_plan=_serialize_investigation_plan(session),
@@ -343,6 +356,8 @@ def serialize_incident_result(session: SessionView) -> dict[str, object]:
 def serialize_session(session: SessionView) -> dict[str, object]:
     return SessionResponseData(
         session_id=session.session_id,
+        incident_id=session.incident_id or _serialize_incident_record(session).incident_id,
+        incident=_serialize_incident_record(session),
         lifecycle_state=session.status,
         created_at=session.created_at,
         updated_at=session.updated_at,
@@ -428,6 +443,23 @@ def serialize_health(
     return {
         "service": service,
         "healthy": True,
+        "version": version,
+        "environment": environment,
+    }
+
+
+def serialize_readiness(
+    *,
+    service: str,
+    version: str,
+    environment: str,
+    ready: bool,
+    readiness_state: str,
+) -> dict[str, object]:
+    return {
+        "service": service,
+        "ready": ready,
+        "readiness_state": readiness_state,
         "version": version,
         "environment": environment,
     }

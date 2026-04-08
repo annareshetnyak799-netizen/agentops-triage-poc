@@ -39,6 +39,10 @@ def test_repository_creates_session_and_trace() -> None:
     trace = repository.get_trace(session.session_id)
 
     assert session.status == SessionStatus.NEW
+    assert session.incident_id is not None
+    assert session.incident_record is not None
+    assert session.incident_record.incident_id == session.incident_id
+    assert session.incident_record.service == session.incident.service
     assert trace is not None
     assert len(trace) == 1
     assert trace[0].step_type == "session_created"

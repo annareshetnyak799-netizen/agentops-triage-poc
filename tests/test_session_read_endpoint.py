@@ -33,6 +33,9 @@ def test_get_session_returns_completed_session_state() -> None:
 
     session = unwrap_success(session_response)
     assert session["session_id"] == session_id
+    assert session["incident_id"] is not None
+    assert session["incident"]["incident_id"] == session["incident_id"]
+    assert session["incident"]["service"] == "payments-api"
     assert session["lifecycle_state"] == "completed"
     assert session["session_state"]["lifecycle_state"] == "completed"
     assert session["session_state"]["waiting_for_approval"] is False

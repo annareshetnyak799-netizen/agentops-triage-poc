@@ -33,6 +33,19 @@ def test_health_endpoint_returns_ok_status() -> None:
     assert data["healthy"] is True
 
 
+def test_ready_endpoint_returns_ready_status() -> None:
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    data = payload["data"]
+
+    assert data["service"] == "agentops-triage-poc"
+    assert data["ready"] is True
+    assert data["readiness_state"] in {"ready", "degraded"}
+
+
 def test_metrics_endpoint_returns_request_counters() -> None:
     client.get("/health")
     client.get("/metrics")
@@ -125,3 +138,28 @@ def test_metrics_capture_untrusted_instruction_signal() -> None:
 
     data = parse_metrics_text(metrics_response)
     assert data.get("agentops_untrusted_instruction_inputs_total", 0) >= 1
+
+
+def test_ready_endpoint_can_report_degraded_readiness() -> None:
+    payload = {
+        "title": "High 5xx rate",
+        "service": "payments-api",
+        "severity": "P1",
+        "timestamp": "2026-04-07T10:00:00Z",
+        "summary": "force_tool_failure during triage",
+        "signals": ["5xx > 12%"],
+        "environment": "prod",
+        "reporter": "oncall-engineer",
+        "alert_payload": {},
+        "links": [],
+    }
+
+    response = client.post("/incident", json=payload)
+    assert response.status_code == 201
+
+    ready_response = client.get("/ready")
+    assert ready_response.status_code == 200
+
+    data = unwrap_success(ready_response)
+    assert data["ready"] is True
+    assert data["readiness_state"] == "degraded"

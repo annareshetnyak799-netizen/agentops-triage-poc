@@ -29,6 +29,9 @@ def test_create_incident_session_returns_structured_result() -> None:
 
     data = unwrap_success(response)
     assert "session_id" in data
+    assert data["incident_id"] is not None
+    assert data["incident"]["incident_id"] == data["incident_id"]
+    assert data["incident"]["service"] == "payments-api"
     assert data["lifecycle_state"] == "completed"
     assert data["session_state"]["lifecycle_state"] == "completed"
     assert data["session_state"]["waiting_for_approval"] is False

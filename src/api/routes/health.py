@@ -1,8 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import PlainTextResponse
 
 from src.api.contracts import SuccessEnvelope, success_envelope
-from src.api.serializers import serialize_health, serialize_root
+from src.api.serializers import serialize_health, serialize_readiness, serialize_root
 from src.config import settings
 from src.observability.metrics import metrics_registry
 
@@ -35,6 +35,32 @@ async def health() -> dict[str, object]:
             service=settings.app_name,
             version="0.1.0",
             environment=settings.environment,
+        )
+    )
+
+
+@router.get("/ready", response_model=SuccessEnvelope)
+async def ready(request: Request) -> dict[str, object]:
+    has_repository = hasattr(request.app.state, "repository")
+    has_orchestrator = hasattr(request.app.state, "orchestrator")
+
+    if not (has_repository and has_orchestrator):
+        raise HTTPException(status_code=503, detail="Service is not ready to accept new sessions.")
+
+    degraded = (
+        metrics_registry.get("degraded_sessions_total") > 0
+        or metrics_registry.get("tool_calls_failed") > 0
+        or metrics_registry.get("llm_calls_failed") > 0
+    )
+
+    readiness_state = "degraded" if degraded else "ready"
+    return success_envelope(
+        serialize_readiness(
+            service=settings.app_name,
+            version="0.1.0",
+            environment=settings.environment,
+            ready=True,
+            readiness_state=readiness_state,
         )
     )
 

@@ -126,3 +126,164 @@
 - **Safety**: PII redaction, tool allowlist, approval
 - **Observability**: structured logs + метрики + трейсинг шагов агента
 - **Evals**: набор тест-кейсов и рубрика качества (accuracy/plan-quality/safety)
+
+---
+
+## Требования
+- Python `3.11+`
+- [`uv`](https://docs.astral.sh/uv/) для установки зависимостей и запуска команд
+
+---
+
+## Быстрый старт
+
+### 1. Установить зависимости
+```bash
+uv sync --extra dev
+```
+
+### 2. Подготовить переменные окружения
+```bash
+cp .env.example .env
+```
+
+По умолчанию проект запускается в безопасном локальном режиме:
+- `AGENTOPS_LLM_BACKEND=mock`
+- `AGENTOPS_REPOSITORY_BACKEND=inmemory`
+- `AGENTOPS_WRITE_TOOLS_ENABLED=false`
+
+Если нужен real OpenAI path, обнови в `.env`:
+```env
+AGENTOPS_LLM_BACKEND=real
+AGENTOPS_LLM_PROVIDER=openai
+AGENTOPS_LLM_MODEL=gpt-4o-mini
+AGENTOPS_LLM_API_KEY=your-api-key
+```
+
+Если нужна SQLite persistence:
+```env
+AGENTOPS_REPOSITORY_BACKEND=sqlite
+AGENTOPS_SQLITE_URL=sqlite:///./agentops_triage.db
+```
+
+### 3. Запустить сервис
+```bash
+uv run uvicorn src.api.app:app --reload
+```
+
+Сервис будет доступен на:
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/docs`
+
+---
+
+## Основные команды
+
+### Прогон тестов
+```bash
+uv run pytest tests
+```
+
+### Линтинг
+```bash
+uv run ruff check .
+```
+
+### Проверка типов
+```bash
+uv run mypy src
+```
+
+### Локальный quality runner
+```bash
+uv run python scripts/run_quality_scenarios.py
+```
+
+---
+
+## Smoke Checks
+
+### Health / readiness / metrics
+```bash
+curl -s http://127.0.0.1:8000/health | python -m json.tool
+curl -s http://127.0.0.1:8000/ready | python -m json.tool
+curl -s http://127.0.0.1:8000/metrics
+```
+
+### Создать triage session
+```bash
+curl -s -X POST http://127.0.0.1:8000/incident \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "High 5xx rate",
+    "service": "payments-api",
+    "severity": "P1",
+    "timestamp": "2026-04-08T10:00:00Z",
+    "summary": "Error rate increased after deploy",
+    "signals": ["5xx > 12%", "latency p95 up 3x"],
+    "environment": "prod",
+    "reporter": "oncall-engineer",
+    "alert_payload": {},
+    "links": []
+  }' | python -m json.tool
+```
+
+### Получить session и trace
+```bash
+SESSION_ID="<session-id>"
+curl -s "http://127.0.0.1:8000/sessions/$SESSION_ID" | python -m json.tool
+curl -s "http://127.0.0.1:8000/sessions/$SESSION_ID/trace" | python -m json.tool
+```
+
+### Approval flow
+```bash
+SESSION_ID="<session-id>"
+APPROVAL_ID="<approval-id>"
+
+curl -s -X POST "http://127.0.0.1:8000/sessions/$SESSION_ID/approval" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"approval_id\": \"$APPROVAL_ID\",
+    \"decision\": \"approved\",
+    \"comment\": \"Approved by reviewer.\"
+  }" | python -m json.tool
+```
+
+---
+
+## Конфигурация
+
+Основные runtime-параметры:
+- `AGENTOPS_ENVIRONMENT`
+- `AGENTOPS_LOG_LEVEL`
+- `AGENTOPS_REPOSITORY_BACKEND`
+- `AGENTOPS_SQLITE_URL`
+- `AGENTOPS_WRITE_TOOLS_ENABLED`
+- `AGENTOPS_MAX_TOOL_CALLS`
+- `AGENTOPS_TOOL_TIMEOUT_S`
+- `AGENTOPS_TIME_BUDGET_S`
+- `AGENTOPS_LLM_BACKEND`
+- `AGENTOPS_LLM_PROVIDER`
+- `AGENTOPS_LLM_MODEL`
+- `AGENTOPS_LLM_TIMEOUT_S`
+- `AGENTOPS_LLM_API_KEY`
+
+См. также:
+- [`.env.example`](.env.example)
+- [`docs/CONFIG.md`](docs/CONFIG.md)
+- [`docs/specs/serving-observability.md`](docs/specs/serving-observability.md)
+
+---
+
+## Текущее состояние проекта
+
+На текущем этапе PoC реализует:
+- structured HTTP API с envelope `status/data/meta`
+- bounded session-oriented orchestration
+- mock и real LLM backends
+- approval-gated risky actions
+- first-class domain entities для `Incident`, `SessionState`, `InvestigationPlan`, `ToolCall`, `Observation`, `SafetyEvent`
+- readiness, health и Prometheus-like metrics
+- explainable trace per session
+
+Проект ориентирован на безопасный read-only triage flow и intentionally не выполняет автоматическое remediation в production.
