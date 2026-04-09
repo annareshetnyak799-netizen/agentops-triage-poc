@@ -3,6 +3,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
 [![Status](https://img.shields.io/badge/status-PoC-orange.svg)](#)
+[![Docker](https://img.shields.io/badge/docker-compose-blue.svg)](#docker-compose)
 
 > **Зачем это бизнесу:** меньше простой и дешевле on-call.  
 > Система сокращает **время до первого плана действий (TTFA / time-to-first-action)** и помогает снижать **MTTR** за счёт автоматизированного сбора контекста (alerts/metrics/logs), ссылок на источники и **safety-гейта** (PII redaction, tool allowlist, approval).
@@ -126,3 +127,212 @@
 - **Safety**: PII redaction, tool allowlist, approval
 - **Observability**: structured logs + метрики + трейсинг шагов агента
 - **Evals**: набор тест-кейсов и рубрика качества (accuracy/plan-quality/safety)
+
+---
+
+## Требования
+- Python `3.11+`
+- [`uv`](https://docs.astral.sh/uv/) для установки зависимостей и запуска команд
+
+---
+
+## Быстрый старт
+
+### 1. Установить зависимости
+```bash
+uv sync --extra dev
+```
+
+### 2. Подготовить переменные окружения
+```bash
+cp .env.example .env
+```
+
+По умолчанию проект запускается в безопасном локальном режиме:
+- `AGENTOPS_LLM_BACKEND=mock`
+- `AGENTOPS_REPOSITORY_BACKEND=inmemory`
+- `AGENTOPS_WRITE_TOOLS_ENABLED=false`
+
+Если нужен real OpenAI path, обнови в `.env`:
+```env
+AGENTOPS_LLM_BACKEND=real
+AGENTOPS_LLM_PROVIDER=openai
+AGENTOPS_LLM_MODEL=gpt-4o-mini
+AGENTOPS_LLM_API_KEY=your-api-key
+AGENTOPS_LLM_TIMEOUT_S=15
+```
+
+Для контейнерного demo с real OpenAI path рекомендуется
+`AGENTOPS_LLM_TIMEOUT_S=15`, чтобы снизить риск преждевременного
+`partial_completed` из-за сетевой задержки или более долгого ответа модели.
+
+Если нужна SQLite persistence:
+```env
+AGENTOPS_REPOSITORY_BACKEND=sqlite
+AGENTOPS_SQLITE_URL=sqlite:///./agentops_triage.db
+```
+
+### 3. Запустить сервис
+```bash
+uv run uvicorn src.api.app:app --reload
+```
+
+Сервис будет доступен на:
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/docs`
+
+### 4. Запуск через Docker Compose
+Для асинхронной проверки и воспроизводимого demo run в репозитории есть минимальная контейнеризация:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+В контейнерном режиме по умолчанию:
+- сервис слушает `0.0.0.0:8000`;
+- backend persistence переключается на `sqlite`;
+- SQLite-файл хранится в named volume `agentops_triage_data`.
+
+Остановить контейнеры:
+```bash
+docker compose down
+```
+
+Остановить контейнеры и удалить volume:
+```bash
+docker compose down -v
+```
+
+---
+
+## Основные команды
+
+### Прогон тестов
+```bash
+uv run pytest tests
+```
+
+### Линтинг
+```bash
+uv run ruff check .
+```
+
+### Проверка типов
+```bash
+uv run mypy src
+```
+
+### Локальный quality runner
+```bash
+uv run python scripts/run_quality_scenarios.py
+```
+
+---
+
+## Smoke Checks
+
+### Health / readiness / metrics
+```bash
+curl -s http://127.0.0.1:8000/health | python -m json.tool
+curl -s http://127.0.0.1:8000/ready | python -m json.tool
+curl -s http://127.0.0.1:8000/metrics
+```
+
+Если сервис поднят через Docker Compose, используются те же smoke checks на `127.0.0.1:8000`.
+
+### Создать triage session
+```bash
+curl -s -X POST http://127.0.0.1:8000/incident \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "High 5xx rate",
+    "service": "payments-api",
+    "severity": "P1",
+    "timestamp": "2026-04-08T10:00:00Z",
+    "summary": "Error rate increased after deploy",
+    "signals": ["5xx > 12%", "latency p95 up 3x"],
+    "environment": "prod",
+    "reporter": "oncall-engineer",
+    "alert_payload": {},
+    "links": []
+  }' | python -m json.tool
+```
+
+### Получить session и trace
+```bash
+SESSION_ID="<session-id>"
+curl -s "http://127.0.0.1:8000/sessions/$SESSION_ID" | python -m json.tool
+curl -s "http://127.0.0.1:8000/sessions/$SESSION_ID/trace" | python -m json.tool
+```
+
+### Approval flow
+```bash
+SESSION_ID="<session-id>"
+APPROVAL_ID="<approval-id>"
+
+curl -s -X POST "http://127.0.0.1:8000/sessions/$SESSION_ID/approval" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"approval_id\": \"$APPROVAL_ID\",
+    \"decision\": \"approved\",
+    \"comment\": \"Approved by reviewer.\"
+  }" | python -m json.tool
+```
+
+---
+
+## Конфигурация
+
+Полный список runtime-параметров (с дефолтами):
+
+| Переменная | Дефолт | Описание |
+|-----------|--------|----------|
+| `AGENTOPS_ENVIRONMENT` | `local` | Окружение: `local`, `test`, `demo` |
+| `AGENTOPS_LOG_LEVEL` | `INFO` | Уровень логирования |
+| `AGENTOPS_HOST` | `127.0.0.1` | Адрес для uvicorn |
+| `AGENTOPS_PORT` | `8000` | Порт |
+| `AGENTOPS_REPOSITORY_BACKEND` | `inmemory` | `inmemory` или `sqlite` |
+| `AGENTOPS_SQLITE_URL` | `sqlite:///./agentops_triage.db` | URL для SQLite |
+| `AGENTOPS_WRITE_TOOLS_ENABLED` | `false` | Разрешить write-инструменты |
+| `AGENTOPS_MAX_TOOL_CALLS` | `6` | Лимит tool-calls на сессию |
+| `AGENTOPS_TOOL_TIMEOUT_S` | `3` | Таймаут одного tool-call (сек) |
+| `AGENTOPS_TIME_BUDGET_S` | `30` | Общий time budget сессии (сек) |
+| `AGENTOPS_MAX_RETRIES` | `2` | Retry для transient ошибок инструментов |
+| `AGENTOPS_LLM_BACKEND` | `mock` | `mock` или `real` |
+| `AGENTOPS_LLM_PROVIDER` | `mock` | `mock` или `openai` |
+| `AGENTOPS_LLM_MODEL` | `mock-model` | Модель LLM |
+| `AGENTOPS_LLM_TIMEOUT_S` | `10` | Таймаут LLM-вызова (сек) |
+| `AGENTOPS_LLM_API_KEY` | — | API ключ (обязателен при `LLM_BACKEND=real`) |
+| `AGENTOPS_MAX_OBSERVATIONS_IN_CONTEXT` | `5` | Макс. observations в промпте |
+| `AGENTOPS_MAX_OBSERVATION_CHARS` | `800` | Макс. символов на observation |
+| `AGENTOPS_OTEL_ENABLED` | `false` | Включить OpenTelemetry tracing |
+| `AGENTOPS_OTEL_SERVICE_NAME` | `agentops-triage-poc` | Имя сервиса для OTEL |
+| `AGENTOPS_FORCE_TOOL_FAILURE` | `false` | Принудительный degraded path (для тестирования) |
+
+Полный пример: [`.env.example`](.env.example). Документация: [`docs/CONFIG.md`](docs/CONFIG.md), [`docs/specs/memory-context.md`](docs/specs/memory-context.md).
+
+---
+
+## Известные ограничения PoC (known limitations)
+
+- **Синхронный triage:** `POST /incident` выполняется синхронно — клиент удерживает HTTP-соединение до завершения triage (до 30s при `time_budget_s=30`). В production рекомендуется фоновая задача + polling через `GET /sessions/{id}`.
+- **Mock tools:** инструменты (metrics, logs, runbook) работают на fixtures, без реальных интеграций с Prometheus/Loki/Confluence.
+- **Structured output:** `OpenAIRealLLMAdapter` использует OpenAI Responses API (`responses.parse`), требует `openai>=1.51`.
+- **Session-scoped memory:** memory не сохраняется между сессиями (ephemeral). Для persistence используйте `AGENTOPS_REPOSITORY_BACKEND=sqlite`.
+- **Eval против prod:** eval fixtures `tools_outage_timeout.json` использует `AGENTOPS_ENVIRONMENT=test` триггер — не воспроизводит degraded path против production сервера.
+
+---
+
+## Текущее состояние проекта
+
+На текущем этапе PoC реализует:
+- structured HTTP API с envelope `status/data/meta`
+- bounded session-oriented orchestration
+- mock и real LLM backends
+- approval-gated risky actions
+- first-class domain entities для `Incident`, `SessionState`, `InvestigationPlan`, `ToolCall`, `Observation`, `SafetyEvent`
+- readiness, health и Prometheus-like metrics
+- explainable trace per session
+
+Проект ориентирован на безопасный read-only triage flow и intentionally не выполняет автоматическое remediation в production.

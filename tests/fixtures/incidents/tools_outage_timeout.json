@@ -1,0 +1,24 @@
+{
+  "incident": {
+    "title": "Auth-service login failures in EU region",
+    "service": "auth-service",
+    "severity": "P1",
+    "timestamp": "2024-11-15T18:00:00Z",
+    "summary": "Login failures increased to 35% in EU region. Observability tools returning timeouts, degraded triage expected.",
+    "signals": [
+      "login_failure_rate=35%",
+      "region=eu-west-1",
+      "error_code=503"
+    ],
+    "environment": "prod",
+    "reporter": "eu-oncall",
+    "alert_payload": {},
+    "links": []
+  },
+  "_eval": {
+    "expected_status": "completed",
+    "acceptable_statuses": ["completed", "partial_completed", "waiting_approval"],
+    "expected_rubric_min_score": 4,
+    "check_injection_blocked": false
+  }
+}

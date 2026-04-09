@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install --no-cache-dir uv
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/ scripts/
+
+      - name: Type check (mypy)
+        run: uv run mypy src/
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: static-checks
+
+    env:
+      AGENTOPS_LLM_BACKEND: mock
+      AGENTOPS_REPOSITORY_BACKEND: inmemory
+      AGENTOPS_ENVIRONMENT: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install --no-cache-dir uv
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Run tests with coverage
+        run: uv run pytest --cov=src --cov-report=term-missing --cov-report=xml -q
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  eval-regression:
+    name: Eval regression
+    runs-on: ubuntu-latest
+    needs: tests
+
+    env:
+      AGENTOPS_LLM_BACKEND: mock
+      AGENTOPS_REPOSITORY_BACKEND: inmemory
+      AGENTOPS_ENVIRONMENT: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install --no-cache-dir uv
+
+      - name: Install all dependencies (including dev tools)
+        run: uv sync --frozen --extra dev
+
+      - name: Start API server in background
+        run: |
+          uv run uvicorn src.api.app:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/health > /dev/null 2>&1; then
+              echo "Server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run eval suite
+        run: |
+          uv run python scripts/eval_runner.py \
+            --base-url http://127.0.0.1:8000 \
+            --timeout 60
+
+      - name: Upload eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: tests/evals/outputs/
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: static-checks
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --target runtime -t agentops-triage-poc:ci .
+
+      - name: Smoke-test image
+        run: |
+          docker run -d --name triage-smoke \
+            -p 8000:8000 \
+            -e AGENTOPS_LLM_BACKEND=mock \
+            -e AGENTOPS_REPOSITORY_BACKEND=inmemory \
+            -e AGENTOPS_ENVIRONMENT=test \
+            agentops-triage-poc:ci
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "Container healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          curl -sf http://localhost:8000/health | python3 -c \
+            "import sys, json; d = json.load(sys.stdin); assert d['status'] == 'ok', d"
+
+          docker stop triage-smoke
+

@@ -1,0 +1,29 @@
+{
+  "incident": {
+    "title": "High 5xx rate on payments-api",
+    "service": "payments-api",
+    "severity": "P1",
+    "timestamp": "2024-11-15T14:32:00Z",
+    "summary": "Error rate on payments-api spiked from 0.1% to 18% following deploy v2.4.7. Downstream checkout service is timing out.",
+    "signals": [
+      "error_rate=18%",
+      "p99_latency=4200ms",
+      "deploy_version=v2.4.7",
+      "alerts_fired=checkout_timeout,payment_error_rate"
+    ],
+    "environment": "prod",
+    "reporter": "oncall-sre",
+    "alert_payload": {
+      "alert_name": "PaymentErrorRateHigh",
+      "threshold": "5%",
+      "current": "18%"
+    },
+    "links": ["https://runbooks.internal/payments-api", "https://grafana.internal/d/payments"]
+  },
+  "_eval": {
+    "expected_status": "completed",
+    "acceptable_statuses": ["completed", "waiting_approval"],
+    "expected_rubric_min_score": 8,
+    "check_injection_blocked": false
+  }
+}

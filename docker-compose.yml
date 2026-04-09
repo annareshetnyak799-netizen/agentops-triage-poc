@@ -1,0 +1,32 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: agentops-triage-poc:local
+    container_name: agentops-triage-poc
+    env_file:
+      - .env
+    environment:
+      AGENTOPS_ENVIRONMENT: demo
+      AGENTOPS_HOST: 0.0.0.0
+      AGENTOPS_PORT: "8000"
+      AGENTOPS_REPOSITORY_BACKEND: sqlite
+      AGENTOPS_SQLITE_URL: sqlite:////app/data/agentops_triage.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - agentops_triage_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  agentops_triage_data:
+    driver: local
