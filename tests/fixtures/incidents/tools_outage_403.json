@@ -1,0 +1,27 @@
+{
+  "incident": {
+    "title": "Notification-service delivery failures",
+    "service": "notification-service",
+    "severity": "P2",
+    "timestamp": "2024-11-15T11:45:00Z",
+    "summary": "Notification delivery failure rate at 28%. SMTP and push gateway returning 403 Forbidden. Likely credential rotation not propagated.",
+    "signals": [
+      "delivery_failure_rate=28%",
+      "smtp_status=403",
+      "push_gateway_status=403"
+    ],
+    "environment": "prod",
+    "reporter": "product-monitoring",
+    "alert_payload": {
+      "alert_name": "NotificationDeliveryFailure",
+      "error_codes": ["403"]
+    },
+    "links": []
+  },
+  "_eval": {
+    "expected_status": "completed",
+    "acceptable_statuses": ["completed", "partial_completed", "waiting_approval"],
+    "expected_rubric_min_score": 6,
+    "check_injection_blocked": false
+  }
+}

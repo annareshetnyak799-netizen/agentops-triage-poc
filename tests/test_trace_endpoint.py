@@ -58,7 +58,6 @@ def test_trace_endpoint_returns_meaningful_steps() -> None:
     assert context_step["type"] == "analysis"
     assert context_step["duration_ms"] >= 0
     assert int(context_step["metadata"]["observations_count"]) >= 1
-    assert int(context_step["metadata"]["known_facts_count"]) >= 1
     assert datetime.fromisoformat(context_step["started_at"]) <= datetime.fromisoformat(
         context_step["completed_at"]
     )

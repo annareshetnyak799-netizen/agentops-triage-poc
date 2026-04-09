@@ -35,7 +35,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
             "links": [],
         },
         expected_status="completed",
-        expected_ref="runbooks/payments-api.md",
+        expected_ref="kb/runbooks/payments-api.md",
         acceptable_statuses=("completed", "waiting_approval"),
     ),
     IncidentScenario(
@@ -60,7 +60,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
             "links": [],
         },
         expected_status="completed",
-        expected_ref="runbooks/inventory-api.md",
+        expected_ref="kb/runbooks/inventory-api.md",
         acceptable_statuses=("completed",),
     ),
     IncidentScenario(
@@ -85,7 +85,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
             "links": [],
         },
         expected_status="waiting_approval",
-        expected_ref="runbooks/5xx-spike.md",
+        expected_ref="kb/runbooks/checkout-api.md",
         acceptable_statuses=("waiting_approval", "completed"),
     ),
 )

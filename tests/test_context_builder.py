@@ -57,7 +57,6 @@ def test_build_session_context_collects_observations_and_refs() -> None:
     assert context.service == "payments-api"
     assert len(context.observations) == 2
     assert "runbooks/payments-api.md" in context.refs
-    assert len(context.known_facts) >= 1
 
 
 def test_build_session_context_sanitizes_instruction_like_input() -> None:

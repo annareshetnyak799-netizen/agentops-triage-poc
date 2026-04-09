@@ -16,7 +16,7 @@ async def test_generic_real_llm_adapter_raises_not_implemented() -> None:
         timeout_s=10,
     )
 
-    with pytest.raises(NotImplementedError, match="Generic RealLLMAdapter is not implemented"):
+    with pytest.raises(NotImplementedError, match="RealLLMAdapter does not implement"):
         await adapter.analyze(
             LLMAnalysisInput(
                 prompt="Analyze safely.",

@@ -4,6 +4,13 @@ from src.llm.base import BaseLLMAdapter, LLMAnalysisInput, LLMAnalysisOutput
 
 
 class RealLLMAdapter(BaseLLMAdapter):
+    """Stub for non-OpenAI providers — not implemented in PoC scope.
+
+    G26: this file exists as a factory fallback for provider strings other than "openai".
+    For OpenAI, the factory routes to OpenAIRealLLMAdapter (openai_adapter.py).
+    To add a new provider, subclass BaseLLMAdapter and register it in factory.py.
+    """
+
     def __init__(
         self,
         provider: str,
@@ -20,8 +27,8 @@ class RealLLMAdapter(BaseLLMAdapter):
         del payload
 
         msg = (
-            "Generic RealLLMAdapter is not implemented. "
-            f"provider={self._provider}, model={self._model}"
+            f"RealLLMAdapter does not implement provider={self._provider!r}. "
+            "Add a dedicated adapter and register it in src/llm/factory.py."
         )
         raise NotImplementedError(msg)
 

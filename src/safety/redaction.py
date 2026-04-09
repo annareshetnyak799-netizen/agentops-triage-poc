@@ -6,8 +6,14 @@ from src.observability.metrics import metrics_registry
 
 
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-TOKEN_RE = re.compile(r"\b(?:sk|pk|ghp)_[A-Za-z0-9]{10,}\b")
-PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
+TOKEN_RE = re.compile(r"\b(?:sk|pk|ghp|xox[baprs])[-_][A-Za-z0-9]{10,}\b")
+
+# Matches formatted phone numbers only: +7..., +1-800-..., (999) 123-4567, etc.
+# Deliberately excludes bare numeric sequences like "3200 rpm" or "1250 ms".
+PHONE_RE = re.compile(
+    r"\+\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{2,4}"  # E.164 / intl
+    r"|\(\d{3}\)\s?\d{3}[\s\-]\d{4}"  # (NXX) NXX-XXXX
+)
 
 
 def redact_text(value: str) -> str:

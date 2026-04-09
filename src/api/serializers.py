@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid5, NAMESPACE_URL
 
-from src.domain.enums import ApprovalDecision, SessionStatus
+from src.domain.enums import SessionStatus
 from src.domain.schemas import (
     ApprovalRequestView,
     ApprovalResponseData,
@@ -320,7 +320,7 @@ def serialize_report(session: SessionView) -> dict[str, object]:
     hypotheses = report.hypothesis_items or _legacy_hypotheses_to_items(session, report)
     next_steps = report.next_step_items or _legacy_next_steps_to_items(report)
     safety_notes = report.safety_note_items or _legacy_safety_notes_to_items(session, report)
-    triage_report = {
+    triage_report: dict[str, object] = {
         "incident_summary": IncidentSummary(
             title=session.incident.title,
             service=session.incident.service,

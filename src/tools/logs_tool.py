@@ -6,7 +6,7 @@ from src.domain.enums import ToolCallStatus
 from src.tools.base import BaseTool, ToolRequest, ToolResult
 
 
-LOG_PROFILES: dict[str, dict[str, object]] = {
+LOG_PROFILES: dict[str, dict[str, list[str] | str]] = {
     "payments-api": {
         "endpoint": "/charge",
         "error_signatures": [

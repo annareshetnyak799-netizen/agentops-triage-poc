@@ -1,5 +1,3 @@
-import pytest
-
 from src.config import settings
 from src.llm.factory import create_llm_adapter
 from src.llm.mock_adapter import MockLLMAdapter

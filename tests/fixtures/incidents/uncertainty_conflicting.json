@@ -1,0 +1,31 @@
+{
+  "incident": {
+    "title": "Conflicting signals on recommendation-engine",
+    "service": "recommendation-engine",
+    "severity": "P3",
+    "timestamp": "2024-11-15T22:15:00Z",
+    "summary": "Recommendation-engine behaving inconsistently. Some regions report high latency, others report normal operation. Recent canary deploy to 10% of traffic. Canary vs baseline metrics contradict each other across data centers.",
+    "signals": [
+      "canary_p99_latency=4100ms",
+      "baseline_p99_latency=310ms",
+      "canary_error_rate=0.1%",
+      "baseline_error_rate=0.09%",
+      "dc_us_east_status=degraded",
+      "dc_us_west_status=healthy",
+      "dc_eu_status=unknown"
+    ],
+    "environment": "prod",
+    "reporter": "canary-watcher",
+    "alert_payload": {
+      "canary_version": "v3.1.0-rc2",
+      "canary_traffic_pct": 10
+    },
+    "links": []
+  },
+  "_eval": {
+    "expected_status": "completed",
+    "acceptable_statuses": ["completed", "waiting_approval", "partial_completed"],
+    "expected_rubric_min_score": 6,
+    "check_injection_blocked": false
+  }
+}

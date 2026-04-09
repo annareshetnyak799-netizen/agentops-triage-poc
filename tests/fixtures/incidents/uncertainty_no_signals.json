@@ -1,0 +1,20 @@
+{
+  "incident": {
+    "title": "Intermittent errors reported by customers",
+    "service": "checkout-service",
+    "severity": "P3",
+    "timestamp": "2024-11-15T20:00:00Z",
+    "summary": "Multiple customer support tickets report intermittent errors during checkout. No automated alerts fired. Metrics appear normal in Grafana but anecdotal reports suggest something is wrong.",
+    "signals": [],
+    "environment": "prod",
+    "reporter": "customer-support",
+    "alert_payload": {},
+    "links": []
+  },
+  "_eval": {
+    "expected_status": "completed",
+    "acceptable_statuses": ["completed", "partial_completed", "waiting_approval"],
+    "expected_rubric_min_score": 4,
+    "check_injection_blocked": false
+  }
+}

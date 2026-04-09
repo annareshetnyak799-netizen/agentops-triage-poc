@@ -28,7 +28,8 @@ async def test_mock_llm_adapter_returns_structured_analysis() -> None:
     )
 
     assert "payments-api" in result.summary
-    assert len(result.hypotheses) >= 1
+    # G6: mock adapter must return ≥2 distinct hypotheses (rubric criterion 2, EVALS.md §3).
+    assert len(result.hypotheses) >= 2
     assert len(result.next_steps) >= 1
     assert metrics_registry.get("llm_structured_success_total") == success_before + 1
 
@@ -48,4 +49,6 @@ async def test_mock_llm_adapter_adds_rollback_step_when_summary_requires_it() ->
         )
     )
 
-    assert result.next_steps[0] == "Rollback the latest production deploy."
+    assert result.next_steps[0] == "Roll back the latest production deploy."
+    # Rollback scenario should still produce ≥2 hypotheses.
+    assert len(result.hypotheses) >= 2

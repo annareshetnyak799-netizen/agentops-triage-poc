@@ -20,12 +20,16 @@ def unwrap_success(response: ResponseLike) -> dict[str, object]:
 
 
 def parse_metrics_text(response: ResponseLike) -> dict[str, int]:
+    """Parse Prometheus text-format metrics into a {name: value} dict.
+
+    Skips comment lines (# HELP / # TYPE) as required by the format spec.
+    """
     assert response.headers["content-type"].startswith("text/plain")
     metrics: dict[str, int] = {}
 
     for raw_line in response.text.splitlines():
         line = raw_line.strip()
-        if not line:
+        if not line or line.startswith("#"):
             continue
         name, value = line.split(" ", maxsplit=1)
         metrics[name] = int(value)

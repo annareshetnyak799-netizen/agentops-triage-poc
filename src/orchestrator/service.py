@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
@@ -30,13 +31,17 @@ from src.prompts.loader import load_prompt
 from src.safety.policy import evaluate_next_steps
 from src.safety.groundedness import evaluate_groundedness
 from src.safety.sanitization import detect_untrusted_instructions
-from src.safety.redaction import redact_list, redact_text
-from src.tools.base import ToolRequest
+from src.safety.redaction import redact_text
+from src.tools.base import ToolRequest, ToolResult
 from src.tools.logs_tool import LogsTool
 from src.tools.metrics_tool import MetricsTool
 from src.tools.runbook_retrieval_tool import RunbookRetrievalTool
 
 logger = get_logger(__name__)
+
+# Error types that warrant a retry (transient failures only).
+# Invalid arguments, auth errors, and parse errors are NOT retriable.
+_RETRIABLE_ERROR_TYPES = frozenset({"timeout", "dependency_unavailable", "upstream_error"})
 
 
 class OrchestratorService:
@@ -55,24 +60,34 @@ class OrchestratorService:
         self._analysis_prompt = load_prompt("analysis.txt")
         self._report_prompt = load_prompt("report.txt")
 
-
     async def run_initial_triage(self, session_id: str) -> SessionView:
+        """Execute the full triage cycle for a session.
+
+        The cycle follows the plan → retrieve → tool → observe → decide loop:
+
+          1. PLAN         — build investigation plan from incident context
+          2. RETRIEVE     — fetch relevant runbook sections from the knowledge base
+          3. EXECUTE TOOLS — collect metrics and log observations (with timeout + retry)
+          4. ANALYZE      — assemble context, build prompt, call LLM
+          5. DECIDE       — apply policy checks, grounding, approval gating, finalize report
+
+        Every stage checks the session budget (tool calls + wall-clock time).
+        If the budget is exhausted at any checkpoint, triage degrades gracefully
+        to partial_completed with whatever evidence was collected so far.
+        """
         session = self._repository.get_session(session_id)
         if session is None:
             raise KeyError(f"Session not found: {session_id}")
 
         logger.info(
             "Initial triage started.",
-            extra={
-                "session_id": session_id,
-                "step_type": "triage",
-                "status": "started",
-            },
+            extra={"session_id": session_id, "step_type": "triage", "status": "started"},
         )
 
         budget = SessionBudget()
         session = self._sync_budget_state(session, budget)
 
+        # ── 1. PLAN: validate input and build investigation plan ──────────────
         session = self._update_status(session_id, SessionStatus.VALIDATING_INPUT)
         session = self._update_status(session_id, SessionStatus.PLANNING)
         session = self._repository.update_investigation_plan(
@@ -88,7 +103,13 @@ class OrchestratorService:
                 budget=budget,
             )
 
-        if "force_tool_failure" in session.incident.summary.lower():
+        # G11: config-controlled degraded path for testing; no magic string in summary.
+        # In the test environment the summary keyword is still supported for HTTP-level tests.
+        _force_failure = settings.force_tool_failure or (
+            settings.environment == "test"
+            and "force_tool_failure" in session.incident.summary.lower()
+        )
+        if _force_failure:
             session = self._update_status(session_id, SessionStatus.EXECUTING_TOOLS)
             session = self._update_status(session_id, SessionStatus.TOOL_FAILED)
             return self._finalize_partial(
@@ -97,6 +118,7 @@ class OrchestratorService:
                 budget=budget,
             )
 
+        # ── 2. RETRIEVE: fetch runbook knowledge for this service ─────────────
         session = self._update_status(session_id, SessionStatus.RETRIEVING)
         session = await self._run_tool(
             session=session,
@@ -109,6 +131,7 @@ class OrchestratorService:
             },
         )
 
+        # ── 3. EXECUTE TOOLS: collect metrics and log observations ────────────
         session = self._update_status(session_id, SessionStatus.EXECUTING_TOOLS)
         session = await self._run_tool(
             session=session,
@@ -129,6 +152,7 @@ class OrchestratorService:
             },
         )
 
+        # ── 4. ANALYZE: build context, prompt, call LLM ──────────────────────
         session = self._update_status(session_id, SessionStatus.ANALYZING)
 
         context_started_at = datetime.now(UTC)
@@ -142,19 +166,14 @@ class OrchestratorService:
             metadata={
                 "observations_count": str(len(context.observations)),
                 "refs_count": str(len(context.refs)),
-                "known_facts_count": str(len(context.known_facts)),
             },
             started_at=context_started_at,
             completed_at=context_completed_at,
         )
 
         prompt_started_at = datetime.now(UTC)
-        analysis_prompt = build_analysis_prompt(
-            template=self._analysis_prompt,
-            context=context,
-        )
+        analysis_prompt = build_analysis_prompt(template=self._analysis_prompt, context=context)
         prompt_completed_at = datetime.now(UTC)
-
         self._append_trace(
             session_id=session.session_id,
             step_type="prompt_build",
@@ -189,17 +208,40 @@ class OrchestratorService:
             },
         )
 
-        llm_started_at = datetime.now(UTC)
-        llm_result = await self._llm_adapter.analyze(
-            LLMAnalysisInput(
-                prompt=analysis_prompt,
-                incident_title=context.incident_title,
-                service=context.service,
-                summary=context.summary,
-                observations=context.observations,
-                refs=context.refs,
+        # G3: enforce session time budget before the LLM call.
+        remaining_s = budget.snapshot().time_remaining_seconds
+        if remaining_s <= 0:
+            metrics_registry.increment("session_budget_exhausted_total")
+            return self._finalize_partial(
+                session=session,
+                reason="Session time budget exhausted before LLM analysis.",
+                budget=budget,
             )
-        )
+
+        llm_timeout = min(settings.llm_timeout_s, max(1, int(remaining_s)))
+        llm_started_at = datetime.now(UTC)
+        try:
+            llm_result = await asyncio.wait_for(
+                self._llm_adapter.analyze(
+                    LLMAnalysisInput(
+                        prompt=analysis_prompt,
+                        incident_title=context.incident_title,
+                        service=context.service,
+                        summary=context.summary,
+                        observations=context.observations,
+                        refs=context.refs,
+                    )
+                ),
+                timeout=llm_timeout,
+            )
+        except asyncio.TimeoutError:
+            metrics_registry.increment("llm_calls_failed")
+            metrics_registry.increment("fallback_total")
+            return self._finalize_partial(
+                session=session,
+                reason="LLM call exceeded session time budget.",
+                budget=budget,
+            )
         llm_completed_at = datetime.now(UTC)
 
         self._append_trace(
@@ -220,6 +262,7 @@ class OrchestratorService:
             completed_at=llm_completed_at,
         )
 
+        # ── 5. DECIDE: policy checks, grounding, approval gate, finalize ─────
         policy_result = evaluate_next_steps(llm_result.next_steps)
         refs = self._collect_refs(session)
         groundedness_result = evaluate_groundedness(
@@ -243,6 +286,7 @@ class OrchestratorService:
                 "refs_count": str(len(refs)),
             },
         )
+
         report_safety_notes = self._build_report_safety_notes(
             base_notes=policy_result.safety_notes,
             hypotheses=llm_result.hypotheses,
@@ -251,11 +295,15 @@ class OrchestratorService:
             sanitization_warnings=sanitization_result.warnings,
         )
         ref_items = self._build_reference_items(session)
+
+        # G10: evidence-based confidence — uses actual observations/refs counts.
         hypothesis_items = self._build_hypothesis_items(
             session_id=session.session_id,
             hypotheses=llm_result.hypotheses,
             ref_items=ref_items,
             weakly_grounded=groundedness_result.weakly_grounded,
+            observations_count=len(session.observations),
+            refs_count=len(refs),
         )
         next_step_items = self._build_next_step_items(
             next_steps=llm_result.next_steps,
@@ -293,7 +341,6 @@ class OrchestratorService:
                 trigger=policy_result.trigger,
                 weakly_grounded=groundedness_result.weakly_grounded,
             )
-
             session = self._repository.set_approval_request(
                 session_id=session.session_id,
                 approval_request=ApprovalRequest(
@@ -324,10 +371,7 @@ class OrchestratorService:
                     ),
                 },
             )
-            session = self._update_status(
-                session.session_id,
-                SessionStatus.WAITING_APPROVAL,
-            )
+            session = self._update_status(session.session_id, SessionStatus.WAITING_APPROVAL)
             metrics_registry.increment("triage_waiting_approval_total")
             logger.info(
                 "Triage requires approval.",
@@ -344,13 +388,11 @@ class OrchestratorService:
         metrics_registry.increment("triage_completed_total")
         logger.info(
             "Triage completed.",
-            extra={
-                "session_id": session.session_id,
-                "step_type": "triage",
-                "status": "completed",
-            },
+            extra={"session_id": session.session_id, "step_type": "triage", "status": "completed"},
         )
         return session
+
+    # ------------------------------------------------------------------ tool execution
 
     async def _run_tool(
         self,
@@ -383,13 +425,16 @@ class OrchestratorService:
             },
         )
 
+        # G1+G2: consume budget once, then execute with timeout + bounded retry.
         budget.consume_tool_call()
         tool_started_at = datetime.now(UTC)
-        result = await tool.execute(
-            ToolRequest(
-                tool_name=tool.name,
-                payload=tool_payload,
-            )
+        result = await self._execute_tool_with_retry(
+            tool=tool,
+            payload=tool_payload,
+            timeout_s=settings.tool_timeout_s,
+            max_retries=settings.max_retries,
+            session_id=session.session_id,
+            budget=budget,
         )
         tool_completed_at = datetime.now(UTC)
 
@@ -413,7 +458,9 @@ class OrchestratorService:
             latency_ms=result.latency_ms,
             error_code=result.error_type,
             error_type=result.error_type,
-            error_message=result.error_type,
+            error_message=(
+                f"{result.tool_name} failed: {result.error_type}" if result.error_type else None
+            ),
             normalized_output=result.data,
             summary=redact_text(result.summary),
         )
@@ -435,13 +482,11 @@ class OrchestratorService:
         )
 
         session = self._repository.add_tool_call(
-            session_id=session.session_id,
-            tool_call=tool_call,
+            session_id=session.session_id, tool_call=tool_call
         )
         session = self._sync_budget_state(session, budget)
         session = self._repository.add_observation(
-            session_id=session.session_id,
-            observation=observation,
+            session_id=session.session_id, observation=observation
         )
 
         logger.info(
@@ -457,11 +502,84 @@ class OrchestratorService:
         )
         return session
 
-    def _update_status(
+    async def _execute_tool_with_retry(
         self,
+        tool: object,
+        payload: dict[str, object],
+        timeout_s: int,
+        max_retries: int,
         session_id: str,
-        next_status: SessionStatus,
-    ) -> SessionView:
+        budget: SessionBudget | None = None,
+    ) -> ToolResult:
+        """Execute a tool with asyncio timeout and bounded retry for transient errors.
+
+        Budget is consumed once by the caller; retries are transparent to the budget.
+        Only errors in _RETRIABLE_ERROR_TYPES trigger a retry.
+        G25: time budget is checked before each retry sleep to avoid overrunning.
+        """
+        from src.tools.base import BaseTool  # local import to avoid circular
+
+        assert isinstance(tool, BaseTool)
+        request = ToolRequest(tool_name=tool.name, payload=payload)
+        last_result: ToolResult | None = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    tool.execute(request),
+                    timeout=float(timeout_s),
+                )
+            except asyncio.TimeoutError:
+                result = ToolResult(
+                    tool_name=tool.name,
+                    status=ToolCallStatus.TIMEOUT,
+                    latency_ms=timeout_s * 1000,
+                    summary=f"{tool.name} timed out after {timeout_s}s.",
+                    error_type="timeout",
+                )
+
+            last_result = result
+
+            if result.status == ToolCallStatus.SUCCESS:
+                return result
+
+            if result.error_type not in _RETRIABLE_ERROR_TYPES or attempt >= max_retries:
+                return result
+
+            wait_s = 0.5 * (2 ** attempt)  # 0.5s → 1.0s
+
+            # G25: skip the sleep if the time budget would be exhausted during the wait.
+            if budget is not None and budget.time_remaining_seconds <= wait_s:
+                logger.warning(
+                    "Skipping retry sleep — time budget would be exceeded.",
+                    extra={
+                        "session_id": session_id,
+                        "step_type": "tool_call",
+                        "tool_name": tool.name,
+                        "time_remaining_s": budget.time_remaining_seconds,
+                        "wait_s": wait_s,
+                    },
+                )
+                return last_result
+
+            logger.warning(
+                "Tool call failed; retrying.",
+                extra={
+                    "session_id": session_id,
+                    "step_type": "tool_call",
+                    "tool_name": tool.name,
+                    "status": "retry",
+                    "attempt": attempt + 1,
+                    "error_type": result.error_type,
+                },
+            )
+            await asyncio.sleep(wait_s)
+
+        return last_result  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------ helpers
+
+    def _update_status(self, session_id: str, next_status: SessionStatus) -> SessionView:
         session = self._repository.update_status(session_id, next_status)
         logger.info(
             "Session status updated.",
@@ -478,7 +596,6 @@ class OrchestratorService:
         snippets = data.get("snippets")
         if not isinstance(snippets, list):
             return []
-
         refs: list[str] = []
         for snippet in snippets:
             if isinstance(snippet, dict):
@@ -516,20 +633,18 @@ class OrchestratorService:
                 hypotheses=["Insufficient evidence for a confident conclusion."],
                 ref_items=[],
                 weakly_grounded=True,
+                observations_count=0,
+                refs_count=0,
             ),
             next_step_items=self._build_next_step_items(
                 next_steps=["Collect more telemetry and rerun triage."],
                 recommended_action=None,
             ),
-            safety_note_items=self._build_safety_note_items(
-                session.session_id,
-                safety_notes,
-            ),
+            safety_note_items=self._build_safety_note_items(session.session_id, safety_notes),
         )
         report.normalize_legacy_fields()
         session = self._repository.set_final_report(
-            session_id=session.session_id,
-            final_report=report,
+            session_id=session.session_id, final_report=report
         )
         session = self._repository.update_session_state(
             session.session_id,
@@ -551,10 +666,7 @@ class OrchestratorService:
             },
         )
         session = self._normalize_partial_transition(session)
-        session = self._update_status(
-            session.session_id,
-            SessionStatus.PARTIAL_COMPLETED,
-        )
+        session = self._update_status(session.session_id, SessionStatus.PARTIAL_COMPLETED)
 
         metrics_registry.increment("fallback_total")
         metrics_registry.increment("degraded_sessions_total")
@@ -570,11 +682,7 @@ class OrchestratorService:
         )
         return session
 
-    def _sync_budget_state(
-        self,
-        session: SessionView,
-        budget: SessionBudget,
-    ) -> SessionView:
+    def _sync_budget_state(self, session: SessionView, budget: SessionBudget) -> SessionView:
         return self._repository.update_session_state(
             session.session_id,
             budget_remaining=budget.snapshot().tool_calls_remaining,
@@ -603,13 +711,10 @@ class OrchestratorService:
     def _normalize_partial_transition(self, session: SessionView) -> SessionView:
         if can_transition(session.status, SessionStatus.PARTIAL_COMPLETED):
             return session
-
         if can_transition(session.status, SessionStatus.TOOL_FAILED):
             return self._update_status(session.session_id, SessionStatus.TOOL_FAILED)
-
         if can_transition(session.status, SessionStatus.ANALYZING):
             return self._update_status(session.session_id, SessionStatus.ANALYZING)
-
         return session
 
     @staticmethod
@@ -619,7 +724,7 @@ class OrchestratorService:
             int((datetime.now(UTC) - session.created_at).total_seconds() * 1000),
         )
         metrics_registry.observe_latency("ttfa_ms", ttfa_ms)
-    
+
     def _append_trace(
         self,
         session_id: str,
@@ -657,7 +762,8 @@ class OrchestratorService:
             return "high"
         if action_type in {"restart_service", "redeploy_service"}:
             return "medium"
-        return "medium"
+        # G30: diagnostic / gated actions that don't directly modify service state.
+        return "low"
 
     @staticmethod
     def _build_hypothesis_items(
@@ -666,47 +772,70 @@ class OrchestratorService:
         hypotheses: list[str],
         ref_items: list[ReferenceView],
         weakly_grounded: bool,
+        observations_count: int = 0,
+        refs_count: int = 0,
     ) -> list[HypothesisView]:
-        supporting_refs = [item.id for item in ref_items]
-        items: list[HypothesisView] = []
+        """Build hypothesis views with evidence-based confidence (G10).
 
+        Confidence reflects actual evidence quality, not only hypothesis position.
+        G23: only the primary hypothesis receives the full ref list; others get
+        an empty list since per-hypothesis ref matching is out of PoC scope.
+        """
+        all_ref_ids = [item.id for item in ref_items]
+        items: list[HypothesisView] = []
         for index, statement in enumerate(hypotheses, start=1):
             items.append(
                 HypothesisView(
                     id=str(
-                        uuid5(
-                            NAMESPACE_URL,
-                            f"hypothesis:{session_id}:{index}:{statement}",
-                        )
+                        uuid5(NAMESPACE_URL, f"hypothesis:{session_id}:{index}:{statement}")
                     ),
                     statement=statement,
                     source="llm_analysis",
                     confidence=OrchestratorService._hypothesis_confidence(
                         index,
                         weakly_grounded=weakly_grounded,
+                        observations_count=observations_count,
+                        refs_count=refs_count,
                     ),
                     status=OrchestratorService._hypothesis_status(
-                        index,
-                        weakly_grounded=weakly_grounded,
+                        index, weakly_grounded=weakly_grounded
                     ),
-                    supporting_refs=supporting_refs,
+                    # Primary hypothesis gets all refs; secondary hypotheses get none
+                    # to avoid misleading grounding claims (full NLP matching is out of scope).
+                    supporting_refs=all_ref_ids if index == 1 else [],
                 )
             )
-
         return items
 
     @staticmethod
-    def _hypothesis_confidence(index: int, *, weakly_grounded: bool = False) -> float:
-        baseline = 0.85 - ((index - 1) * 0.1)
+    def _hypothesis_confidence(
+        index: int,
+        *,
+        weakly_grounded: bool = False,
+        observations_count: int = 0,
+        refs_count: int = 0,
+    ) -> float:
+        """Evidence-based confidence: starts from evidence quality, not position."""
+        if observations_count >= 2 and refs_count >= 1:
+            base = 0.82
+        elif observations_count >= 1 or refs_count >= 1:
+            base = 0.65
+        else:
+            base = 0.45
+
+        # Small positional discount: capped at 0.10 so ordering still matters slightly.
+        positional_discount = min((index - 1) * 0.05, 0.10)
+        result = base - positional_discount
         if weakly_grounded:
-            baseline -= 0.15
-        return max(0.4, baseline)
+            result -= 0.10
+        return round(max(0.30, result), 2)
 
     @staticmethod
     def _hypothesis_status(index: int, *, weakly_grounded: bool = False) -> str:
         if weakly_grounded:
             return "weakened"
-        if index == 1:
+        # G22: top-2 hypotheses are "active" when evidence is sufficient.
+        if index <= 2:
             return "active"
         return "weakened"
 
@@ -760,7 +889,6 @@ class OrchestratorService:
             )
         else:
             base_reason = "Suggested next step may modify system state."
-
         if weakly_grounded:
             return (
                 f"{base_reason} Evidence is limited, so the recommendation must be "
@@ -772,7 +900,6 @@ class OrchestratorService:
     def _budget_metadata(budget: SessionBudget | None) -> dict[str, str]:
         if budget is None:
             return {}
-
         snapshot = budget.snapshot()
         return {
             "tool_calls_used": str(snapshot.tool_calls_used),
@@ -783,7 +910,6 @@ class OrchestratorService:
 
     def _build_reference_items(self, session: SessionView) -> list[ReferenceView]:
         refs: list[ReferenceView] = []
-
         for index, ref in enumerate(self._collect_refs(session), start=1):
             refs.append(
                 ReferenceView(
@@ -795,7 +921,6 @@ class OrchestratorService:
                     target_ref=ref,
                 )
             )
-
         for index, observation in enumerate(session.observations, start=1):
             refs.append(
                 ReferenceView(
@@ -807,7 +932,6 @@ class OrchestratorService:
                     target_ref=observation.source_ref,
                 )
             )
-
         for index, tool_call in enumerate(session.tool_calls, start=1):
             refs.append(
                 ReferenceView(
@@ -819,14 +943,13 @@ class OrchestratorService:
                     target_ref=tool_call.raw_output_ref or tool_call.tool_call_id,
                 )
             )
-
         seen: set[str] = set()
-        ordered_refs: list[ReferenceView] = []
-        for ref in refs:
-            if ref.id not in seen:
-                ordered_refs.append(ref)
-                seen.add(ref.id)
-        return ordered_refs
+        ordered: list[ReferenceView] = []
+        for item in refs:
+            if item.id not in seen:
+                ordered.append(item)
+                seen.add(item.id)
+        return ordered
 
     @staticmethod
     def _tool_result_snippet(tool_call: ToolCallRecord) -> str:
@@ -848,12 +971,8 @@ class OrchestratorService:
         return mapping[status]
 
     @staticmethod
-    def _build_safety_note_items(
-        session_id: str,
-        notes: list[str],
-    ) -> list[SafetyEventView]:
+    def _build_safety_note_items(session_id: str, notes: list[str]) -> list[SafetyEventView]:
         items: list[SafetyEventView] = []
-
         for index, note in enumerate(notes, start=1):
             lowered = note.lower()
             note_type = "uncertainty"
@@ -879,17 +998,10 @@ class OrchestratorService:
                 note_type = "redaction"
                 severity = "medium"
                 related_ref = "trace:redaction"
-            elif "not confirmed yet" in lowered or "preliminary" in lowered:
-                note_type = "uncertainty"
-                severity = "low"
-
             items.append(
                 SafetyEventView(
                     safety_event_id=str(
-                        uuid5(
-                            NAMESPACE_URL,
-                            f"safety-event:{session_id}:{index}:{note}",
-                        )
+                        uuid5(NAMESPACE_URL, f"safety-event:{session_id}:{index}:{note}")
                     ),
                     session_id=session_id,
                     type=note_type,
@@ -899,7 +1011,6 @@ class OrchestratorService:
                     created_at=datetime.now(UTC),
                 )
             )
-
         return items
 
     @staticmethod
@@ -910,10 +1021,8 @@ class OrchestratorService:
         safety_notes: list[str],
     ) -> list[str]:
         unknowns: list[str] = []
-
         if status == SessionStatus.ANALYZING and not refs:
             unknowns.append("No corroborating runbook or knowledge-base references were available.")
-
         for note in safety_notes:
             lowered = note.lower()
             if "insufficient" in lowered or "unavailable" in lowered or "incomplete" in lowered:
@@ -922,14 +1031,13 @@ class OrchestratorService:
                 unknowns.append(note)
             if "untrusted instruction-like content" in lowered:
                 unknowns.append(note)
-
         seen: set[str] = set()
-        ordered_unknowns: list[str] = []
+        ordered: list[str] = []
         for item in unknowns:
             if item not in seen:
-                ordered_unknowns.append(item)
+                ordered.append(item)
                 seen.add(item)
-        return ordered_unknowns
+        return ordered
 
     @staticmethod
     def _build_report_safety_notes(
@@ -943,21 +1051,19 @@ class OrchestratorService:
         notes = list(base_notes)
         notes.extend(groundedness_warnings)
         notes.extend(sanitization_warnings)
-
         if hypotheses:
             notes.append(
                 "Root cause is not confirmed yet; hypotheses are evidence-backed but preliminary."
             )
-
         if not refs:
             notes.append(
-                "Knowledge-base corroboration was unavailable; recommendations rely on live observations only."
+                "Knowledge-base corroboration was unavailable; "
+                "recommendations rely on live observations only."
             )
-
         seen: set[str] = set()
-        ordered_notes: list[str] = []
+        ordered: list[str] = []
         for note in notes:
             if note not in seen:
-                ordered_notes.append(note)
+                ordered.append(note)
                 seen.add(note)
-        return ordered_notes
+        return ordered

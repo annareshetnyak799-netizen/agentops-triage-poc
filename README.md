@@ -175,6 +175,29 @@ uv run uvicorn src.api.app:app --reload
 - `http://127.0.0.1:8000/`
 - `http://127.0.0.1:8000/docs`
 
+### 4. Запуск через Docker Compose
+Для асинхронной проверки и воспроизводимого demo run в репозитории есть минимальная контейнеризация:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+В контейнерном режиме по умолчанию:
+- сервис слушает `0.0.0.0:8000`;
+- backend persistence переключается на `sqlite`;
+- SQLite-файл хранится в named volume `agentops_triage_data`.
+
+Остановить контейнеры:
+```bash
+docker compose down
+```
+
+Остановить контейнеры и удалить volume:
+```bash
+docker compose down -v
+```
+
 ---
 
 ## Основные команды
@@ -209,6 +232,8 @@ curl -s http://127.0.0.1:8000/health | python -m json.tool
 curl -s http://127.0.0.1:8000/ready | python -m json.tool
 curl -s http://127.0.0.1:8000/metrics
 ```
+
+Если сервис поднят через Docker Compose, используются те же smoke checks на `127.0.0.1:8000`.
 
 ### Создать triage session
 ```bash
@@ -253,25 +278,43 @@ curl -s -X POST "http://127.0.0.1:8000/sessions/$SESSION_ID/approval" \
 
 ## Конфигурация
 
-Основные runtime-параметры:
-- `AGENTOPS_ENVIRONMENT`
-- `AGENTOPS_LOG_LEVEL`
-- `AGENTOPS_REPOSITORY_BACKEND`
-- `AGENTOPS_SQLITE_URL`
-- `AGENTOPS_WRITE_TOOLS_ENABLED`
-- `AGENTOPS_MAX_TOOL_CALLS`
-- `AGENTOPS_TOOL_TIMEOUT_S`
-- `AGENTOPS_TIME_BUDGET_S`
-- `AGENTOPS_LLM_BACKEND`
-- `AGENTOPS_LLM_PROVIDER`
-- `AGENTOPS_LLM_MODEL`
-- `AGENTOPS_LLM_TIMEOUT_S`
-- `AGENTOPS_LLM_API_KEY`
+Полный список runtime-параметров (с дефолтами):
 
-См. также:
-- [`.env.example`](.env.example)
-- [`docs/CONFIG.md`](docs/CONFIG.md)
-- [`docs/specs/serving-observability.md`](docs/specs/serving-observability.md)
+| Переменная | Дефолт | Описание |
+|-----------|--------|----------|
+| `AGENTOPS_ENVIRONMENT` | `local` | Окружение: `local`, `test`, `demo` |
+| `AGENTOPS_LOG_LEVEL` | `INFO` | Уровень логирования |
+| `AGENTOPS_HOST` | `127.0.0.1` | Адрес для uvicorn |
+| `AGENTOPS_PORT` | `8000` | Порт |
+| `AGENTOPS_REPOSITORY_BACKEND` | `inmemory` | `inmemory` или `sqlite` |
+| `AGENTOPS_SQLITE_URL` | `sqlite:///./agentops_triage.db` | URL для SQLite |
+| `AGENTOPS_WRITE_TOOLS_ENABLED` | `false` | Разрешить write-инструменты |
+| `AGENTOPS_MAX_TOOL_CALLS` | `6` | Лимит tool-calls на сессию |
+| `AGENTOPS_TOOL_TIMEOUT_S` | `3` | Таймаут одного tool-call (сек) |
+| `AGENTOPS_TIME_BUDGET_S` | `30` | Общий time budget сессии (сек) |
+| `AGENTOPS_MAX_RETRIES` | `2` | Retry для transient ошибок инструментов |
+| `AGENTOPS_LLM_BACKEND` | `mock` | `mock` или `real` |
+| `AGENTOPS_LLM_PROVIDER` | `mock` | `mock` или `openai` |
+| `AGENTOPS_LLM_MODEL` | `mock-model` | Модель LLM |
+| `AGENTOPS_LLM_TIMEOUT_S` | `10` | Таймаут LLM-вызова (сек) |
+| `AGENTOPS_LLM_API_KEY` | — | API ключ (обязателен при `LLM_BACKEND=real`) |
+| `AGENTOPS_MAX_OBSERVATIONS_IN_CONTEXT` | `5` | Макс. observations в промпте |
+| `AGENTOPS_MAX_OBSERVATION_CHARS` | `800` | Макс. символов на observation |
+| `AGENTOPS_OTEL_ENABLED` | `false` | Включить OpenTelemetry tracing |
+| `AGENTOPS_OTEL_SERVICE_NAME` | `agentops-triage-poc` | Имя сервиса для OTEL |
+| `AGENTOPS_FORCE_TOOL_FAILURE` | `false` | Принудительный degraded path (для тестирования) |
+
+Полный пример: [`.env.example`](.env.example). Документация: [`docs/CONFIG.md`](docs/CONFIG.md), [`docs/specs/memory-context.md`](docs/specs/memory-context.md).
+
+---
+
+## Известные ограничения PoC (known limitations)
+
+- **Синхронный triage:** `POST /incident` выполняется синхронно — клиент удерживает HTTP-соединение до завершения triage (до 30s при `time_budget_s=30`). В production рекомендуется фоновая задача + polling через `GET /sessions/{id}`.
+- **Mock tools:** инструменты (metrics, logs, runbook) работают на fixtures, без реальных интеграций с Prometheus/Loki/Confluence.
+- **Structured output:** `OpenAIRealLLMAdapter` использует OpenAI Responses API (`responses.parse`), требует `openai>=1.51`.
+- **Session-scoped memory:** memory не сохраняется между сессиями (ephemeral). Для persistence используйте `AGENTOPS_REPOSITORY_BACKEND=sqlite`.
+- **Eval против prod:** eval fixtures `tools_outage_timeout.json` использует `AGENTOPS_ENVIRONMENT=test` триггер — не воспроизводит degraded path против production сервера.
 
 ---
 

@@ -1,67 +1,55 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from time import monotonic
 
 from src.domain.enums import ToolCallStatus
 from src.tools.base import BaseTool, ToolRequest, ToolResult
 
+# Runbooks are stored as markdown files in src/kb/runbooks/.
+# The tool performs a real filesystem lookup: exact service match first,
+# then fuzzy prefix match, then the generic fallback runbook.
+_KB_DIR = Path(__file__).resolve().parents[1] / "kb" / "runbooks"
 
-RUNBOOK_PROFILES: dict[str, list[dict[str, str]]] = {
-    "payments-api": [
-        {
-            "title": "Payments API incident triage",
-            "content": (
-                "Correlate error-rate increase with deploy timeline. "
-                "Validate upstream payment provider health before rollback."
-            ),
-            "ref": "runbooks/payments-api.md",
-        },
-        {
-            "title": "5xx spike investigation",
-            "content": (
-                "Check whether 5xx increase is isolated to a single endpoint. "
-                "Review dependency timeout patterns and retry saturation."
-            ),
-            "ref": "runbooks/5xx-spike.md",
-        },
-    ],
-    "inventory-api": [
-        {
-            "title": "Inventory API latency regression",
-            "content": (
-                "Correlate release timing with read replica lag, cache misses, "
-                "and availability lookup slowdowns before any rollback decision."
-            ),
-            "ref": "runbooks/inventory-api.md",
-        },
-        {
-            "title": "Latency spike investigation",
-            "content": (
-                "Check whether latency is isolated to /availability and validate "
-                "cache behavior, replica health, and queue depth."
-            ),
-            "ref": "runbooks/latency-spike.md",
-        },
-    ],
-    "checkout-api": [
-        {
-            "title": "Checkout API incident triage",
-            "content": (
-                "Correlate checkout failures with deploy timing and payment "
-                "authorization health before considering rollback."
-            ),
-            "ref": "runbooks/checkout-api.md",
-        },
-        {
-            "title": "5xx spike investigation",
-            "content": (
-                "Check whether failures concentrate on /submit-order and review "
-                "retry saturation, downstream auth failures, and user impact."
-            ),
-            "ref": "runbooks/5xx-spike.md",
-        },
-    ],
-}
+# Maximum characters extracted per section heading match.
+_SECTION_MAX_CHARS = 400
+
+
+def _load_runbook(service: str) -> tuple[str, str] | None:
+    """Return (path_label, content) for the best matching runbook file, or None."""
+    # 1. Exact filename match: payments-api.md for "payments-api"
+    candidate = _KB_DIR / f"{service}.md"
+    if candidate.is_file():
+        return (str(candidate.relative_to(_KB_DIR.parent.parent)), candidate.read_text("utf-8"))
+
+    # 2. Prefix match: "payments" matches "payments-api.md"
+    slug = service.split("-")[0].lower()
+    for path in sorted(_KB_DIR.glob("*.md")):
+        if path.stem.startswith(slug) and path.stem != "generic-service":
+            return (str(path.relative_to(_KB_DIR.parent.parent)), path.read_text("utf-8"))
+
+    return None
+
+
+def _extract_snippets(content: str, ref: str) -> list[dict[str, str]]:
+    """Split markdown into section-level snippets (one per ## heading)."""
+    sections = re.split(r"\n(?=## )", content.strip())
+    snippets: list[dict[str, str]] = []
+    for section in sections:
+        lines = section.strip().splitlines()
+        if not lines:
+            continue
+        heading = lines[0].lstrip("#").strip()
+        body = "\n".join(lines[1:]).strip()
+        if not body:
+            continue
+        snippets.append({
+            "title": heading,
+            "content": body[:_SECTION_MAX_CHARS],
+            "ref": ref,
+        })
+    return snippets or [{"title": "Runbook", "content": content[:_SECTION_MAX_CHARS], "ref": ref}]
 
 
 class RunbookRetrievalTool(BaseTool):
@@ -72,40 +60,32 @@ class RunbookRetrievalTool(BaseTool):
 
         service = request.payload.get("service", "unknown-service")
 
+        result = _load_runbook(service)
+        if result is None:
+            # Fall back to the generic runbook.
+            generic = _KB_DIR / "generic-service.md"
+            ref = "kb/runbooks/generic-service.md"
+            content = generic.read_text("utf-8") if generic.is_file() else (
+                "Correlate the incident window with recent deploys, dependency health, "
+                "and endpoint-specific degradation before risky actions."
+            )
+        else:
+            ref, content = result
+
+        snippets = _extract_snippets(content, ref)
         latency_ms = int((monotonic() - started_at) * 1000)
-        snippets = RUNBOOK_PROFILES.get(
-            service,
-            [
-                {
-                    "title": "Generic service triage",
-                    "content": (
-                        "Correlate the incident window with recent deploys, dependency "
-                        "health, and endpoint-specific degradation before risky actions."
-                    ),
-                    "ref": "runbooks/service-triage.md",
-                },
-                {
-                    "title": "Latency and 5xx investigation",
-                    "content": (
-                        "Review endpoint concentration, timeout patterns, retry behavior, "
-                        "and immediate customer impact."
-                    ),
-                    "ref": "runbooks/5xx-spike.md",
-                },
-            ],
-        )
 
         return ToolResult(
             tool_name=self.name,
             status=ToolCallStatus.SUCCESS,
             latency_ms=latency_ms,
             summary=(
-                f"Retrieved {len(snippets)} relevant runbook snippets for {service}. "
-                "Suggested actions include checking deploy correlation, dependency health, "
-                "endpoint-specific failures, and retry saturation."
+                f"Retrieved {len(snippets)} runbook sections for {service} from {ref}. "
+                "Key steps: deploy correlation, dependency health, retry saturation, rollback criteria."
             ),
             data={
                 "service": service,
+                "source": ref,
                 "snippets": snippets,
             },
         )
