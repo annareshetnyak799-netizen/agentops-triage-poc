@@ -3,6 +3,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
 [![Status](https://img.shields.io/badge/status-PoC-orange.svg)](#)
+[![Docker](https://img.shields.io/badge/docker-compose-blue.svg)](#docker-compose)
 
 > **Зачем это бизнесу:** меньше простой и дешевле on-call.  
 > Система сокращает **время до первого плана действий (TTFA / time-to-first-action)** и помогает снижать **MTTR** за счёт автоматизированного сбора контекста (alerts/metrics/logs), ссылок на источники и **safety-гейта** (PII redaction, tool allowlist, approval).
@@ -158,7 +159,12 @@ AGENTOPS_LLM_BACKEND=real
 AGENTOPS_LLM_PROVIDER=openai
 AGENTOPS_LLM_MODEL=gpt-4o-mini
 AGENTOPS_LLM_API_KEY=your-api-key
+AGENTOPS_LLM_TIMEOUT_S=15
 ```
+
+Для контейнерного demo с real OpenAI path рекомендуется
+`AGENTOPS_LLM_TIMEOUT_S=15`, чтобы снизить риск преждевременного
+`partial_completed` из-за сетевой задержки или более долгого ответа модели.
 
 Если нужна SQLite persistence:
 ```env
