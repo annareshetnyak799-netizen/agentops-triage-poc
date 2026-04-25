@@ -171,3 +171,116 @@ flowchart LR
     EVAL --> REPORT
     EVAL --> TELE
 ```
+
+---
+
+## 8. Module Map
+
+```
+src/
+├── api/                        # HTTP layer (FastAPI)
+│   ├── app.py                  # Lifespan, OTEL wiring, router registration
+│   ├── routes/
+│   │   ├── incident.py         # POST /incident — triage entry point
+│   │   ├── sessions.py         # GET /sessions/{id}/trace, PATCH /sessions/{id}/approve
+│   │   └── health.py           # GET /health, GET /metrics (Prometheus format)
+│   └── serializers.py          # SessionView → HTTP response envelope
+│
+├── domain/                     # Pure domain types (no I/O)
+│   ├── enums.py                # SessionStatus, ToolCallStatus, Severity
+│   └── schemas.py              # Pydantic models: IncidentInput, SessionView, FinalReport, …
+│
+├── orchestrator/               # Core agent loop
+│   ├── service.py              # OrchestratorService — plan → retrieve → tool → observe → decide
+│   ├── report_builder.py       # ReportBuilder — all report-assembly logic, independently testable
+│   ├── budget.py               # SessionBudget — wall-clock + tool-call enforcement
+│   ├── context.py              # build_session_context(), RollingSummary
+│   └── transitions.py          # can_transition() — state machine guard
+│
+├── tools/                      # Operational data sources
+│   ├── base.py                 # BaseTool, ToolRequest, ToolResult
+│   ├── metrics_tool.py         # Live metric profile lookup (per-service profiles)
+│   └── logs_tool.py            # Log pattern lookup (per-service log profiles)
+│
+├── llm/                        # LLM abstraction layer
+│   ├── base.py                 # BaseLLMAdapter, LLMAnalysisInput/Output
+│   ├── factory.py              # create_llm_adapter() — selects mock vs OpenAI
+│   ├── mock_adapter.py         # Deterministic mock for tests/CI
+│   ├── openai_adapter.py       # OpenAI Structured Output adapter
+│   ├── prompt_builder.py       # build_analysis_prompt() — injects SessionContext
+│   └── prompts/                # Versioned prompt templates (planning.txt, analysis.txt, …)
+│
+├── kb/                         # Knowledge base
+│   └── runbooks/               # Per-service runbook markdown files
+│
+├── safety/                     # Safety pipeline (all pure functions)
+│   ├── redaction.py            # PII redaction (EMAIL_RE, PHONE_RE, TOKEN_RE)
+│   ├── sanitization.py         # Prompt injection detection + sanitization
+│   ├── policy.py               # Next-step policy evaluation → approval gate
+│   └── groundedness.py         # Evidence sufficiency check
+│
+├── persistence/                # Storage abstraction
+│   ├── protocols.py            # SessionRepository protocol
+│   ├── repository.py           # InMemorySessionRepository (PoC default)
+│   └── sqlite_repository.py    # SQLAlchemy/SQLite implementation
+│
+└── observability/              # Metrics and structured logging
+    ├── metrics.py              # MetricsRegistry — counters + latency histograms
+    └── logging.py              # Structured JSON logger setup
+```
+
+---
+
+## 9. Request Lifecycle
+
+```
+POST /incident
+    │
+    ▼
+incident.py (route)
+    │  validates IncidentInput via Pydantic
+    │  creates session via repository
+    │
+    ▼
+OrchestratorService.run_initial_triage()
+    │
+    ├── 1. PLAN         validate → planning → InvestigationPlan (signal-aware)
+    │
+    ├── 2. RETRIEVE     retrieving → RunbookRetrievalTool (kb/runbooks/*.md)
+    │
+    ├── 3. EXECUTE      executing_tools → MetricsTool + LogsTool
+    │      │             (asyncio.wait_for + bounded retry)
+    │      └──[any fail]→ tool_failed → analyzing (degraded path continues)
+    │
+    ├── 4. ANALYZE      build_session_context → build_analysis_prompt → LLM
+    │                   (time-budget checked before call)
+    │
+    └── 5. DECIDE       policy_check → groundedness_check → ReportBuilder
+                        → [approval_required] → waiting_approval
+                        → [clean]             → completed
+                        → [budget/timeout]    → partial_completed
+```
+
+---
+
+## 10. Key Design Constraints
+
+| Constraint | Value | Source |
+|---|---|---|
+| Tool timeout | 3 s per call | `config.py:tool_timeout_s` |
+| Tool retries | 2 (transient errors only) | `config.py:max_retries` |
+| Session time budget | 30 s wall-clock | `config.py:time_budget_s` |
+| Max tool calls | 10 per session | `SessionBudget` |
+| Max context observations | 5 | `config.py:max_observations_in_context` |
+| PII leakage tolerance | 0 | `docs/EVALS.md §5` |
+
+---
+
+## 11. Related Documents
+
+- [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — full design rationale, API contracts, data models
+- [STATE_MACHINE.md](STATE_MACHINE.md) — session lifecycle, valid transitions, invariants
+- [STATE_MEMORY.md](STATE_MEMORY.md) — context assembly, rolling summary, eviction policy
+- [EVALS.md](EVALS.md) — eval fixtures, rubric scorer, PoC success metrics
+- [GOVERNANCE.md](GOVERNANCE.md) — policy rules, approval gate triggers, safety pipeline
+- [docs/specs/](specs/) — per-module specs (orchestrator, tools, memory-context, serving)

@@ -9,12 +9,8 @@ from src.domain.enums import SessionStatus, ToolCallStatus
 from src.domain.schemas import (
     ApprovalRequest,
     FinalReport,
-    HypothesisView,
     InvestigationPlanView,
     Observation,
-    NextStepView,
-    ReferenceView,
-    SafetyEventView,
     SessionView,
     ToolCallRecord,
 )
@@ -25,6 +21,7 @@ from src.observability.logging import get_logger
 from src.observability.metrics import metrics_registry
 from src.orchestrator.budget import SessionBudget
 from src.orchestrator.context import build_session_context
+from src.orchestrator.report_builder import ReportBuilder
 from src.orchestrator.transitions import can_transition
 from src.persistence.protocols import SessionRepository
 from src.prompts.loader import load_prompt
@@ -56,6 +53,7 @@ class OrchestratorService:
         self._runbook_tool = RunbookRetrievalTool()
         self._llm_adapter = llm_adapter or create_llm_adapter()
 
+        self._report_builder = ReportBuilder()
         self._planning_prompt = load_prompt("planning.txt")
         self._analysis_prompt = load_prompt("analysis.txt")
         self._report_prompt = load_prompt("report.txt")
@@ -133,6 +131,8 @@ class OrchestratorService:
 
         # ── 3. EXECUTE TOOLS: collect metrics and log observations ────────────
         session = self._update_status(session_id, SessionStatus.EXECUTING_TOOLS)
+        tool_calls_before_executing = len(session.tool_calls)
+
         session = await self._run_tool(
             session=session,
             budget=budget,
@@ -151,6 +151,34 @@ class OrchestratorService:
                 "environment": session.incident.environment or "unknown",
             },
         )
+
+        # Detect failures in the executing_tools phase and pass through tool_failed
+        # state as required by STATE_MACHINE.md §4.8 and the transition catalog §6.
+        executing_tool_calls = session.tool_calls[tool_calls_before_executing:]
+        any_tool_failed = any(
+            tc.status != ToolCallStatus.SUCCESS for tc in executing_tool_calls
+        )
+        if any_tool_failed:
+            failed_names = [
+                tc.tool_name
+                for tc in executing_tool_calls
+                if tc.status != ToolCallStatus.SUCCESS
+            ]
+            session = self._update_status(session_id, SessionStatus.TOOL_FAILED)
+            self._append_trace(
+                session_id=session.session_id,
+                step_type="tool_failed",
+                status="degraded",
+                details=(
+                    f"One or more operational tools failed: {', '.join(failed_names)}. "
+                    "Proceeding to analysis with available partial evidence."
+                ),
+                metadata={
+                    "failed_tools": ", ".join(failed_names),
+                    "total_executing_tools": str(len(executing_tool_calls)),
+                    "failed_count": str(len(failed_names)),
+                },
+            )
 
         # ── 4. ANALYZE: build context, prompt, call LLM ──────────────────────
         session = self._update_status(session_id, SessionStatus.ANALYZING)
@@ -287,17 +315,17 @@ class OrchestratorService:
             },
         )
 
-        report_safety_notes = self._build_report_safety_notes(
+        report_safety_notes = self._report_builder.build_report_safety_notes(
             base_notes=policy_result.safety_notes,
             hypotheses=llm_result.hypotheses,
             refs=refs,
             groundedness_warnings=groundedness_result.warnings,
             sanitization_warnings=sanitization_result.warnings,
         )
-        ref_items = self._build_reference_items(session)
+        ref_items = self._report_builder.build_reference_items(session)
 
         # G10: evidence-based confidence — uses actual observations/refs counts.
-        hypothesis_items = self._build_hypothesis_items(
+        hypothesis_items = self._report_builder.build_hypothesis_items(
             session_id=session.session_id,
             hypotheses=llm_result.hypotheses,
             ref_items=ref_items,
@@ -305,18 +333,18 @@ class OrchestratorService:
             observations_count=len(session.observations),
             refs_count=len(refs),
         )
-        next_step_items = self._build_next_step_items(
+        next_step_items = self._report_builder.build_next_step_items(
             next_steps=llm_result.next_steps,
             recommended_action=policy_result.recommended_action,
         )
-        safety_note_items = self._build_safety_note_items(
+        safety_note_items = self._report_builder.build_safety_note_items(
             session.session_id,
             report_safety_notes,
         )
 
         report = FinalReport(
             summary=redact_text(llm_result.summary),
-            unknowns=self._build_unknowns(
+            unknowns=self._report_builder.build_unknowns(
                 status=session.status,
                 refs=refs,
                 safety_notes=report_safety_notes,
@@ -337,7 +365,7 @@ class OrchestratorService:
         if policy_result.requires_approval:
             metrics_registry.increment("policy_blocks_total")
             metrics_registry.increment("approval_requests_total")
-            approval_reason = self._approval_reason(
+            approval_reason = self._report_builder.approval_reason(
                 trigger=policy_result.trigger,
                 weakly_grounded=groundedness_result.weakly_grounded,
             )
@@ -345,11 +373,11 @@ class OrchestratorService:
                 session_id=session.session_id,
                 approval_request=ApprovalRequest(
                     approval_id=str(uuid5(NAMESPACE_URL, f"approval:{session.session_id}")),
-                    action_type=self._action_type(
+                    action_type=self._report_builder.action_type(
                         policy_result.recommended_action or llm_result.next_steps[0]
                     ),
                     reason=approval_reason,
-                    risk_level=self._risk_level(
+                    risk_level=self._report_builder.risk_level(
                         policy_result.recommended_action or llm_result.next_steps[0]
                     ),
                     status="pending",
@@ -452,7 +480,7 @@ class OrchestratorService:
             tool_name=result.tool_name,
             input_payload=tool_payload,
             status=result.status,
-            normalized_status=self._normalized_tool_status(result.status),
+            normalized_status=self._report_builder.normalized_tool_status(result.status),
             started_at=tool_started_at,
             completed_at=tool_completed_at,
             latency_ms=result.latency_ms,
@@ -591,6 +619,14 @@ class OrchestratorService:
         )
         return session
 
+    def _collect_refs(self, session: SessionView) -> list[str]:
+        """Collect unique runbook refs from observations.
+
+        Kept as an instance method so tests can monkeypatch it on the service instance.
+        Delegates to ReportBuilder._collect_refs for the actual logic.
+        """
+        return ReportBuilder._collect_refs(session)
+
     @staticmethod
     def _extract_refs(data: dict[str, object]) -> list[str]:
         snippets = data.get("snippets")
@@ -603,13 +639,6 @@ class OrchestratorService:
                 if isinstance(ref, str):
                     refs.append(ref)
         return refs
-
-    @staticmethod
-    def _collect_refs(session: SessionView) -> list[str]:
-        refs: list[str] = []
-        for observation in session.observations:
-            refs.extend(observation.refs)
-        return sorted(set(refs))
 
     def _finalize_partial(
         self,
@@ -628,7 +657,7 @@ class OrchestratorService:
         report = FinalReport(
             summary="Partial triage result generated.",
             unknowns=[reason],
-            hypothesis_items=self._build_hypothesis_items(
+            hypothesis_items=self._report_builder.build_hypothesis_items(
                 session_id=session.session_id,
                 hypotheses=["Insufficient evidence for a confident conclusion."],
                 ref_items=[],
@@ -636,11 +665,13 @@ class OrchestratorService:
                 observations_count=0,
                 refs_count=0,
             ),
-            next_step_items=self._build_next_step_items(
+            next_step_items=self._report_builder.build_next_step_items(
                 next_steps=["Collect more telemetry and rerun triage."],
                 recommended_action=None,
             ),
-            safety_note_items=self._build_safety_note_items(session.session_id, safety_notes),
+            safety_note_items=self._report_builder.build_safety_note_items(
+                session.session_id, safety_notes
+            ),
         )
         report.normalize_legacy_fields()
         session = self._repository.set_final_report(
@@ -691,13 +722,87 @@ class OrchestratorService:
 
     @staticmethod
     def _build_investigation_plan(session: SessionView) -> InvestigationPlanView:
+        """Build a signal-aware investigation plan.
+
+        The plan adapts its focus and steps based on the incident signals and service type,
+        giving the LLM a more targeted prompt context and reflecting ReAct-style planning
+        (SYSTEM-DESIGN §2.1).
+        """
         service = session.incident.service
+        signals = session.incident.signals or []
+        summary_lower = (session.incident.summary or "").lower()
+        signals_text = " ".join(signals).lower()
+        combined = summary_lower + " " + signals_text
+
         goal = f"Determine the likely cause of the {service} incident and identify safe next steps."
-        steps = [
-            f"Collect runbook context for {service} and the reported signals.",
-            f"Query live metrics and logs for {service} in {session.incident.environment or 'unknown'}.",
-            "Synthesize evidence into grounded hypotheses and recommended next steps.",
+        env = session.incident.environment or "unknown"
+
+        # Detect signal categories to tailor the investigation focus.
+        has_deploy_signal = any(
+            kw in combined for kw in ("deploy", "rollback", "release", "revert", "version")
+        )
+        has_latency_signal = any(
+            kw in combined for kw in ("latency", "p95", "p99", "slow", "timeout", "queue")
+        )
+        has_error_rate_signal = any(
+            kw in combined for kw in ("5xx", "error rate", "failure", "500", "503")
+        )
+        has_dependency_signal = any(
+            kw in combined for kw in ("upstream", "dependency", "provider", "downstream", "third-party")
+        )
+        has_auth_signal = any(
+            kw in combined for kw in ("auth", "login", "token", "jwt", "oauth", "403", "401")
+        )
+        no_signals = not signals
+
+        # Build targeted investigation steps based on detected signal categories.
+        steps: list[str] = [
+            f"Retrieve runbook context for {service} to establish known failure modes and triage steps.",
         ]
+
+        if no_signals:
+            steps.append(
+                f"Query metrics and logs for {service} in {env} — signals are missing, "
+                "so broad telemetry collection is required to identify the anomaly."
+            )
+        else:
+            if has_error_rate_signal:
+                steps.append(
+                    f"Query error-rate metrics for {service} in {env} and identify "
+                    "the specific endpoints and error codes driving the spike."
+                )
+            if has_latency_signal:
+                steps.append(
+                    f"Collect latency percentile data (p95/p99) for {service} in {env} "
+                    "and check for queue depth or retry saturation."
+                )
+            if has_dependency_signal:
+                steps.append(
+                    f"Examine upstream dependency health for {service}: check for timeout "
+                    "patterns, circuit-breaker state, and provider-side error rates."
+                )
+            if has_auth_signal:
+                steps.append(
+                    f"Inspect authentication and token-validation logs for {service} in {env} "
+                    "to detect IdP errors, token store latency, or configuration drift."
+                )
+            if not (has_error_rate_signal or has_latency_signal or has_dependency_signal or has_auth_signal):
+                steps.append(
+                    f"Query live metrics and logs for {service} in {env} "
+                    "to correlate the reported signals with observable service state."
+                )
+
+        if has_deploy_signal:
+            steps.append(
+                f"Correlate the incident window with recent deploys for {service}: "
+                "check deploy timestamps, changed components, and canary metrics."
+            )
+
+        steps.append(
+            "Synthesize collected evidence into grounded hypotheses, rank by confidence, "
+            "and propose prioritized next steps with explicit approval requirements."
+        )
+
         return InvestigationPlanView(
             plan_id=str(uuid5(NAMESPACE_URL, f"plan:{session.session_id}:v1")),
             session_id=session.session_id,
@@ -746,132 +851,6 @@ class OrchestratorService:
         )
 
     @staticmethod
-    def _action_type(recommended_action: str) -> str:
-        action = recommended_action.lower()
-        if "roll back" in action or "rollback" in action or "rolling back" in action:
-            return "rollback_deployment"
-        if "restart" in action:
-            return "restart_service"
-        if "redeploy" in action or "revert" in action:
-            return "redeploy_service"
-        return "gated_action"
-
-    def _risk_level(self, recommended_action: str) -> str:
-        action_type = self._action_type(recommended_action)
-        if action_type == "rollback_deployment":
-            return "high"
-        if action_type in {"restart_service", "redeploy_service"}:
-            return "medium"
-        # G30: diagnostic / gated actions that don't directly modify service state.
-        return "low"
-
-    @staticmethod
-    def _build_hypothesis_items(
-        *,
-        session_id: str,
-        hypotheses: list[str],
-        ref_items: list[ReferenceView],
-        weakly_grounded: bool,
-        observations_count: int = 0,
-        refs_count: int = 0,
-    ) -> list[HypothesisView]:
-        """Build hypothesis views with evidence-based confidence (G10).
-
-        Confidence reflects actual evidence quality, not only hypothesis position.
-        G23: only the primary hypothesis receives the full ref list; others get
-        an empty list since per-hypothesis ref matching is out of PoC scope.
-        """
-        all_ref_ids = [item.id for item in ref_items]
-        items: list[HypothesisView] = []
-        for index, statement in enumerate(hypotheses, start=1):
-            items.append(
-                HypothesisView(
-                    id=str(
-                        uuid5(NAMESPACE_URL, f"hypothesis:{session_id}:{index}:{statement}")
-                    ),
-                    statement=statement,
-                    source="llm_analysis",
-                    confidence=OrchestratorService._hypothesis_confidence(
-                        index,
-                        weakly_grounded=weakly_grounded,
-                        observations_count=observations_count,
-                        refs_count=refs_count,
-                    ),
-                    status=OrchestratorService._hypothesis_status(
-                        index, weakly_grounded=weakly_grounded
-                    ),
-                    # Primary hypothesis gets all refs; secondary hypotheses get none
-                    # to avoid misleading grounding claims (full NLP matching is out of scope).
-                    supporting_refs=all_ref_ids if index == 1 else [],
-                )
-            )
-        return items
-
-    @staticmethod
-    def _hypothesis_confidence(
-        index: int,
-        *,
-        weakly_grounded: bool = False,
-        observations_count: int = 0,
-        refs_count: int = 0,
-    ) -> float:
-        """Evidence-based confidence: starts from evidence quality, not position."""
-        if observations_count >= 2 and refs_count >= 1:
-            base = 0.82
-        elif observations_count >= 1 or refs_count >= 1:
-            base = 0.65
-        else:
-            base = 0.45
-
-        # Small positional discount: capped at 0.10 so ordering still matters slightly.
-        positional_discount = min((index - 1) * 0.05, 0.10)
-        result = base - positional_discount
-        if weakly_grounded:
-            result -= 0.10
-        return round(max(0.30, result), 2)
-
-    @staticmethod
-    def _hypothesis_status(index: int, *, weakly_grounded: bool = False) -> str:
-        if weakly_grounded:
-            return "weakened"
-        # G22: top-2 hypotheses are "active" when evidence is sufficient.
-        if index <= 2:
-            return "active"
-        return "weakened"
-
-    @staticmethod
-    def _build_next_step_items(
-        *,
-        next_steps: list[str],
-        recommended_action: str | None,
-    ) -> list[NextStepView]:
-        return [
-            NextStepView(
-                priority=index,
-                action=action,
-                source="llm_analysis",
-                rationale=OrchestratorService._build_next_step_rationale(action),
-                requires_approval=action == recommended_action,
-            )
-            for index, action in enumerate(next_steps, start=1)
-        ]
-
-    @staticmethod
-    def _build_next_step_rationale(action: str) -> str:
-        lowered = action.lower()
-        if "deploy" in lowered or "rollback" in lowered or "roll back" in lowered:
-            return "Needed to confirm whether the latest deployment correlates with the incident."
-        if "dependency" in lowered or "provider" in lowered:
-            return "Needed to validate whether an upstream dependency is contributing to the failure."
-        if "log" in lowered:
-            return "Needed to confirm the failure mode and identify endpoint-specific error patterns."
-        if "retry" in lowered or "saturation" in lowered:
-            return "Needed to determine whether retry pressure is amplifying the incident."
-        if "metric" in lowered or "latency" in lowered:
-            return "Needed to quantify the current impact and confirm the scope of degradation."
-        return "Needed to reduce uncertainty and validate the current working hypotheses."
-
-    @staticmethod
     def _degradation_type(reason: str) -> str:
         lowered = reason.lower()
         if "budget exhausted" in lowered:
@@ -879,22 +858,6 @@ class OrchestratorService:
         if "tool failure" in lowered or "dependency" in lowered:
             return "tool_failure"
         return "degraded_partial"
-
-    @staticmethod
-    def _approval_reason(*, trigger: str | None, weakly_grounded: bool) -> str:
-        if trigger == "rollback":
-            base_reason = (
-                "Suggested next step includes a deployment rollback and "
-                "requires explicit human approval."
-            )
-        else:
-            base_reason = "Suggested next step may modify system state."
-        if weakly_grounded:
-            return (
-                f"{base_reason} Evidence is limited, so the recommendation must be "
-                "reviewed carefully by a human."
-            )
-        return base_reason
 
     @staticmethod
     def _budget_metadata(budget: SessionBudget | None) -> dict[str, str]:
@@ -908,162 +871,3 @@ class OrchestratorService:
             "time_remaining_ms": str(int(snapshot.time_remaining_seconds * 1000)),
         }
 
-    def _build_reference_items(self, session: SessionView) -> list[ReferenceView]:
-        refs: list[ReferenceView] = []
-        for index, ref in enumerate(self._collect_refs(session), start=1):
-            refs.append(
-                ReferenceView(
-                    id=f"kb:{index}",
-                    type="kb_doc",
-                    source="runbook_retrieval_tool",
-                    title=ref.rsplit("/", maxsplit=1)[-1],
-                    snippet=ref,
-                    target_ref=ref,
-                )
-            )
-        for index, observation in enumerate(session.observations, start=1):
-            refs.append(
-                ReferenceView(
-                    id=observation.observation_id or f"obs:{observation.source}:{index}",
-                    type="observation",
-                    source=observation.source,
-                    title=observation.title or observation.source.replace("_", " "),
-                    snippet=observation.summary,
-                    target_ref=observation.source_ref,
-                )
-            )
-        for index, tool_call in enumerate(session.tool_calls, start=1):
-            refs.append(
-                ReferenceView(
-                    id=tool_call.tool_call_id or f"tool:{tool_call.tool_name}:{index}",
-                    type="tool_result",
-                    source=tool_call.tool_name,
-                    title=tool_call.tool_name.replace("_", " "),
-                    snippet=tool_call.summary or self._tool_result_snippet(tool_call),
-                    target_ref=tool_call.raw_output_ref or tool_call.tool_call_id,
-                )
-            )
-        seen: set[str] = set()
-        ordered: list[ReferenceView] = []
-        for item in refs:
-            if item.id not in seen:
-                ordered.append(item)
-                seen.add(item.id)
-        return ordered
-
-    @staticmethod
-    def _tool_result_snippet(tool_call: ToolCallRecord) -> str:
-        if tool_call.summary:
-            return tool_call.summary
-        if tool_call.normalized_output:
-            return str(tool_call.normalized_output)
-        return tool_call.tool_name
-
-    @staticmethod
-    def _normalized_tool_status(status: ToolCallStatus) -> str:
-        mapping = {
-            ToolCallStatus.PENDING: "pending",
-            ToolCallStatus.SUCCESS: "completed",
-            ToolCallStatus.FAILED: "failed",
-            ToolCallStatus.TIMEOUT: "timed_out",
-            ToolCallStatus.SKIPPED: "skipped",
-        }
-        return mapping[status]
-
-    @staticmethod
-    def _build_safety_note_items(session_id: str, notes: list[str]) -> list[SafetyEventView]:
-        items: list[SafetyEventView] = []
-        for index, note in enumerate(notes, start=1):
-            lowered = note.lower()
-            note_type = "uncertainty"
-            severity = "low"
-            related_ref = "report"
-            if "degraded mode" in lowered or "partial result" in lowered:
-                note_type = "degradation"
-                severity = "medium"
-                related_ref = "trace:degradation"
-            elif "groundedness" in lowered or "corroborat" in lowered:
-                note_type = "groundedness"
-                severity = "medium"
-                related_ref = "trace:groundedness_check"
-            elif "untrusted instruction-like content" in lowered:
-                note_type = "sanitization"
-                severity = "medium"
-                related_ref = "trace:sanitization_check"
-            elif "approval" in lowered or "modify system state" in lowered:
-                note_type = "policy"
-                severity = "medium"
-                related_ref = "trace:policy_check"
-            elif "redact" in lowered:
-                note_type = "redaction"
-                severity = "medium"
-                related_ref = "trace:redaction"
-            items.append(
-                SafetyEventView(
-                    safety_event_id=str(
-                        uuid5(NAMESPACE_URL, f"safety-event:{session_id}:{index}:{note}")
-                    ),
-                    session_id=session_id,
-                    type=note_type,
-                    message=note,
-                    severity=severity,
-                    related_ref=related_ref,
-                    created_at=datetime.now(UTC),
-                )
-            )
-        return items
-
-    @staticmethod
-    def _build_unknowns(
-        *,
-        status: SessionStatus,
-        refs: list[str],
-        safety_notes: list[str],
-    ) -> list[str]:
-        unknowns: list[str] = []
-        if status == SessionStatus.ANALYZING and not refs:
-            unknowns.append("No corroborating runbook or knowledge-base references were available.")
-        for note in safety_notes:
-            lowered = note.lower()
-            if "insufficient" in lowered or "unavailable" in lowered or "incomplete" in lowered:
-                unknowns.append(note)
-            if "groundedness" in lowered or "corroborat" in lowered:
-                unknowns.append(note)
-            if "untrusted instruction-like content" in lowered:
-                unknowns.append(note)
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for item in unknowns:
-            if item not in seen:
-                ordered.append(item)
-                seen.add(item)
-        return ordered
-
-    @staticmethod
-    def _build_report_safety_notes(
-        *,
-        base_notes: list[str],
-        hypotheses: list[str],
-        refs: list[str],
-        groundedness_warnings: list[str],
-        sanitization_warnings: list[str],
-    ) -> list[str]:
-        notes = list(base_notes)
-        notes.extend(groundedness_warnings)
-        notes.extend(sanitization_warnings)
-        if hypotheses:
-            notes.append(
-                "Root cause is not confirmed yet; hypotheses are evidence-backed but preliminary."
-            )
-        if not refs:
-            notes.append(
-                "Knowledge-base corroboration was unavailable; "
-                "recommendations rely on live observations only."
-            )
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for note in notes:
-            if note not in seen:
-                ordered.append(note)
-                seen.add(note)
-        return ordered

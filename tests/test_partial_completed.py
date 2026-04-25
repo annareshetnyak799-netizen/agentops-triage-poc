@@ -4,10 +4,11 @@ from fastapi.testclient import TestClient
 import pytest
 
 from src.api.app import app
-from src.domain.enums import Severity
+from src.domain.enums import Severity, ToolCallStatus
 from src.domain.schemas import IncidentInput
 from src.orchestrator.service import OrchestratorService
 from src.persistence.repository import InMemorySessionRepository
+from src.tools.base import BaseTool, ToolRequest, ToolResult
 from tests.http_helpers import unwrap_success
 
 
@@ -106,3 +107,75 @@ async def test_budget_exhaustion_partial_trace_includes_budget_snapshot(monkeypa
     assert degradation_step.metadata["tool_calls_remaining"] == "0"
     assert degradation_step.metadata["elapsed_ms"] == "30000"
     assert degradation_step.metadata["time_remaining_ms"] == "0"
+
+
+@pytest.mark.anyio
+async def test_tool_failure_transitions_through_tool_failed_state() -> None:
+    """STATE_MACHINE.md §4.8: tool failures must pass through tool_failed before analyzing.
+
+    Verifies that when an operational tool returns a non-success status, the session
+    correctly transitions executing_tools → tool_failed → analyzing, and a tool_failed
+    trace entry is emitted with failure metadata.
+    """
+    repository = InMemorySessionRepository()
+
+    class FailingMetricsTool(BaseTool):
+        name = "metrics_tool"
+
+        async def execute(self, request: ToolRequest) -> ToolResult:
+            return ToolResult(
+                tool_name=self.name,
+                status=ToolCallStatus.TIMEOUT,
+                latency_ms=3000,
+                summary="metrics_tool timed out after 3s.",
+                error_type="timeout",
+            )
+
+    orchestrator = OrchestratorService(repository=repository)
+    orchestrator._metrics_tool = FailingMetricsTool()  # type: ignore[assignment]
+
+    incident = IncidentInput(
+        title="Metrics backend unavailable",
+        service="payments-api",
+        severity=Severity.P1,
+        timestamp=datetime.now(UTC),
+        summary="Error rate increased, metrics backend unreachable",
+        signals=["5xx > 8%"],
+        environment="prod",
+        reporter="oncall-engineer",
+        alert_payload={},
+        links=[],
+    )
+    session = repository.create_session(incident)
+    result = await orchestrator.run_initial_triage(session.session_id)
+
+    # Session should complete (with partial data from logs_tool) or be partial_completed.
+    # Either way, tool_failed state must have been visited.
+    assert result.status.value in {"completed", "partial_completed", "waiting_approval"}
+
+    trace = repository.get_trace(session.session_id)
+    assert trace is not None
+    step_types = [step.step_type for step in trace]
+
+    # The critical invariant: tool_failed step must appear in trace.
+    assert "tool_failed" in step_types, (
+        f"Expected 'tool_failed' step in trace, got: {step_types}"
+    )
+
+    tool_failed_step = next(step for step in trace if step.step_type == "tool_failed")
+    assert tool_failed_step.status == "degraded"
+    assert "metrics_tool" in tool_failed_step.metadata["failed_tools"]
+    assert tool_failed_step.metadata["failed_count"] == "1"
+
+    # Verify status transitions: tool_failed must appear between executing_tools and analyzing.
+    status_transitions = [
+        step for step in trace if step.step_type == "status_transition"
+    ]
+    transition_values = [s.metadata.get("to_status") for s in status_transitions]
+    assert "tool_failed" in transition_values, (
+        f"Expected 'tool_failed' in status transitions, got: {transition_values}"
+    )
+    tool_failed_idx = transition_values.index("tool_failed")
+    assert "analyzing" in transition_values[tool_failed_idx:], (
+        f"Expected 'analyzing' after 'tool_failed' in transitions: {transition_values}"
+    )
